@@ -1,0 +1,123 @@
+Full table scan investigation
+============================
+
+Environment: Go 1.26.4, linux/amd64, AMD Ryzen Threadripper 3960X.
+GOMAXPROCS=1, pinned to logical CPU 2 with taskset.
+BenchmarkScanCompare uses identical int values, reads and sums every value,
+and stores the result in an observable sink. All three summation functions
+are non-inlined; Dict.All and its callback inline inside its summation helper.
+Both containers are presized. Construction is outside benchmark timing.
+No deletes or mutations occur during these scans. All cases allocate 0 B/scan.
+
+Three runs, 300ms each; median ns per visited entry:
+
+                        Dict       Go map       []int reference
+  1,000 entries        0.4921       8.893          0.2352
+  1,000,000 entries    2.031       10.32           0.3246
+
+The map/Dict ratio is about 18x at 1,000 entries and 5x at 1,000,000.
+This confirms a scan advantage but not a universal 10x factor.
+
+Linux perf stat
+---------------
+Each case visits 1,000,000,000 entries: 1,000,000 scans of 1,000 entries,
+or 1,000 scans of 1,000,000 entries. User-mode events only. External perf
+includes startup, construction and the benchmark's initial calibration scan;
+their contribution is amortized by the fixed scan count. Six events were
+multiplexed: each ran approximately 83% of the time and perf scaled counts.
+The following normalized figures are approximate, not scan-only exact counts.
+
+Per visited entry:
+  size       kind     cycles  instructions  branches  branch misses  cache misses
+  1,000      Dict      2.135      12.036       2.997      0.00104       0.000086
+  1,000      map      38.428     111.901      25.000      0.24178       0.000231
+  1,000,000  Dict      8.971      12.301       3.052      0.00086       0.014806
+  1,000,000  map      45.162     112.522      25.124      0.25980       0.054207
+
+"cache misses" means perf's generic cache-misses event on this CPU; it is not
+a count of every miss at every cache level. It should not be interpreted as
+a direct measurement of memory bandwidth or as a decomposition of total time.
+
+Raw scaled perf counts, in the same order as above:
+  event                    Dict 1k          map 1k       Dict 1m          map 1m
+  cycles                 2134660116     38427686457    8970874135     45162231196
+  instructions          12035559624    111901003767   12301122250    112521702300
+  branches               2997100507     24999959911    3051663435     25123560359
+  branch-misses             1043832       241777326        861022       259796454
+  cache-references         52409074       149746430    1012153388      1180413644
+  cache-misses                86145          231225      14805902        54207402
+
+CPU profiles and generated code
+-------------------------------
+Separate million-entry runs profiled with go tool pprof:
+  map: 7.32s total samples; runtime.mapIterNext 68.58% cumulative;
+       internal/runtime/maps.(*Iter).Next 43.31% flat / 61.48% cumulative;
+       ctrlGroup.matchFull 11.07% flat;
+       sumMapForBenchmark 95.77% cumulative, including iterator calls.
+  Dict: 3.94s total samples; inlined All loop 95.43% flat;
+        sumDictForBenchmark 95.94% cumulative.
+Construction accounts for most of the remainder in both profiles.
+
+go tool objdump shows Dict's summation as a short loop with no calls:
+  load entry base, compute i*32, check live byte, load value, add, advance.
+For the map, each returned entry calls runtime.mapIterNext, with the running
+sum saved to and restored from the stack across that call.
+
+Interpretation
+--------------
+The instruction count (~9x higher) and branch count (~8x higher), the large
+gap even when both tables fit in cache, and the profile's iterator hotspot
+point to iterator overhead as the main explanation. The map also executes
+about one mispredicted branch per four entries, versus very predictable live
+and loop checks for Dict in this no-deletions workload.
+
+Dict stores entries in a contiguous insertion-order array and scans it without
+consulting the hash index. Sequential addresses are friendly to prefetching.
+The map has a directory of tables and groups, must find occupied slots, and
+uses a general iterator with type metadata and mutation/growth checks.
+Even a read-only int/int scan pays checks that protect its general semantics.
+The cost of actually re-looking-up an entry after growth is not incurred here.
+
+Randomization is not a per-entry memory shuffle. The iterator picks random
+entry and directory offsets when initialized, then advances slot indices in
+order within tables (wrapping around). Some locality costs remain at table
+boundaries, but this experiment does not isolate the cost of the offsets.
+Do not claim that disabling randomization would remove the measured gap.
+
+The large-table cache counters show locality also matters, but Dict's own
+scan slows from ~0.49 to ~2.03 ns/key while the map slows from ~8.89 to ~10.32.
+Consequently the advantage shrinks as these tables get large. Dict reads
+32-byte entries even when only an 8-byte value is needed: the dense []int
+reference demonstrates that Dict is not as compact as a plain value array.
+Expensive per-entry user work will further reduce the relative advantage.
+
+Runtime sources consulted (matching the installed toolchain):
+  https://github.com/golang/go/blob/go1.26.4/src/internal/runtime/maps/table.go
+    Iter.Init and Iter.Next; random starting offsets and slot traversal.
+  https://github.com/golang/go/blob/go1.26.4/src/internal/runtime/maps/map.go#L134-L175
+    Iteration semantics, including additions/deletions/growth during iteration.
+
+Reproduce
+---------
+go test -c -o /tmp/insdict-scan.test
+GOMAXPROCS=1 taskset -c 2 /tmp/insdict-scan.test -test.run='^$' \
+  -test.bench='^BenchmarkScanCompare$' -test.benchtime=300ms \
+  -test.count=3 -test.cpu=1 -test.benchmem
+
+For each kind=dict,map and size=1000,1000000, choose scans=1000000 for size
+1000, or scans=1000 for size 1000000. For example:
+GOMAXPROCS=1 taskset -c 2 perf stat \
+  -e cycles:u,instructions:u,branches:u,branch-misses:u,cache-references:u,cache-misses:u \
+  -- /tmp/insdict-scan.test -test.run='^$' \
+  -test.bench='^BenchmarkScanCompare$/^n=1000000$/^map$' \
+  -test.benchtime=1000x -test.cpu=1
+
+GOMAXPROCS=1 taskset -c 2 /tmp/insdict-scan.test -test.run='^$' \
+  -test.bench='^BenchmarkScanCompare$/^n=1000000$/^map$' \
+  -test.benchtime=5s -test.cpu=1 -test.cpuprofile=/tmp/map-scan.cpu
+go tool pprof -top /tmp/insdict-scan.test /tmp/map-scan.cpu
+go tool objdump -s 'insdict.sumMapForBenchmark' /tmp/insdict-scan.test
+go tool objdump -s 'insdict.sumDictForBenchmark' /tmp/insdict-scan.test
+
+Use an allowed CPU for taskset on other machines. Map hash seeds, CPU frequency,
+compiler code generation, key/value types, and machine activity affect results.

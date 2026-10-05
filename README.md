@@ -9,6 +9,34 @@ We now use int64 indexes so that Dict size is not limited to 2^31.
 In terms of performance, the common full table scans over All() are 5-10x faster than the built-in
 go map. Our point operations are tied or slightly faster than the built-in map. Benchmarks follow.
 
+# Why our Dict full scans are up to 10x faster than map.
+
+Dict stores entries in one contiguous array, separate from its hash index.
+All() walks that array in insertion order; Go inlines the iterator and its
+callback. This gives predictable branches and sequential memory access that the
+CPU can prefetch. The hash index is not touched during a scan.
+
+Go's built-in map scans hash-table slots through a general runtime iterator.
+Each returned entry involves a runtime call, iterator state updates, occupancy
+checks, and checks for table growth and indirect key/value storage. It also
+supports adding and deleting entries during iteration, which Dict.All() does
+not promise. Go randomizes starting offsets but walks slots in order within
+each table; it does not randomly shuffle every memory access.
+
+On Go 1.26.4/linux/amd64, a matched integer-value summation benchmark measured
+about 112 instructions and 25 branches per map entry versus 12 instructions and
+3 branches for Dict. With 1,000 entries fitting in cache, the map took
+8.89 ns/key versus 0.49 ns/key for Dict. At one million entries it took
+10.32 ns/key versus 2.03 ns/key. These measurements point mainly to iterator
+overhead, with locality also contributing at larger sizes. The ratio depends
+on table size, key/value types, and how much work the loop body does.
+
+See [scan_profile.txt](scan_profile.txt) for Linux `perf` counters, CPU profiles,
+and reproduction commands, and [scan_bench_test.go](scan_bench_test.go) for the
+matched benchmarks. The
+[Go runtime's iteration discussion](https://github.com/golang/go/blob/go1.26.4/src/internal/runtime/maps/map.go#L134-L175)
+explains its more demanding mutation semantics.
+
 # memory overhead is about 1.7x
 
 For 1,000,000 map[int]int entries vs Dict, heap after GC:
