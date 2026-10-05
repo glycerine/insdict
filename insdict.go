@@ -355,14 +355,14 @@ func (d *Dict[K, V]) Pack(force bool) {
 // since it does not auto-repack the array, but
 // instead only writes a tombstone. The user must call Pack() manually.
 //
-// Put of new keys during All iteration is not recommended. This is not well
-// defined behavior. Put could provoke a resize of the underlying array.
+// Put of new keys during All iteration is not recommended.
+// Put could provoke a resize of the underlying array.
 // The copy to the new larger array will omit tombstones. This will
 // lower the index of seen elements. You risk missing some
 // elements during the iteration, if there were tombstones present before
 // the current iteration point. If you really must Put during iteration,
 // be sure to call Pack(true) before starting All so as to force vacuuming out of all
-// tombstones beforehand; and omit all Del calls during your iteration.
+// tombstones beforehand; and forbid Del calls during your iteration.
 func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		for i := 0; i < len(d.entries); i++ {
