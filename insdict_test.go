@@ -942,63 +942,212 @@ func FuzzDictStringKeys(f *testing.F) {
 // Benchmarks
 // ---------------------------------------------------------------------------
 
+// Put/Get benchmarks sweep batch sizes and report per-key metrics
+// (put_ns/key, get_ns/key) so sizes and implementations are comparable.
+//
+//	go test -run '^$' -bench 'Put|Get' -benchtime=200ms
+var opSizes = []int{10, 100, 1_000, 10_000, 100_000, 1_000_000}
+
+func reportNsPerKey(b *testing.B, unit string, keysPerOp int) {
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/(float64(b.N)*float64(keysPerOp)), unit)
+}
+
+// Builds a fresh dict of n keys each iteration, growing from empty.
 func BenchmarkDictPut(b *testing.B) {
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		d := NewDict[int, int]()
-		for j := 0; j < 1000; j++ {
-			d.Put(j, j)
-		}
+	for _, n := range opSizes {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				d := NewDict[int, int]()
+				for j := 0; j < n; j++ {
+					d.Put(j, j)
+				}
+			}
+			reportNsPerKey(b, "put_ns/key", n)
+		})
 	}
 }
 
+// Built-in map grown from empty: the like-for-like comparison with DictPut.
 func BenchmarkMapPut(b *testing.B) {
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		m := map[int]int{}
-		for j := 0; j < 1000; j++ {
-			m[j] = j
-		}
+	for _, n := range opSizes {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				m := map[int]int{}
+				for j := 0; j < n; j++ {
+					m[j] = j
+				}
+			}
+			reportNsPerKey(b, "put_ns/key", n)
+		})
+	}
+}
+
+// Built-in map presized with make(map, n): isolates insert cost from growth.
+func BenchmarkMapPutPresized(b *testing.B) {
+	for _, n := range opSizes {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				m := make(map[int]int, n)
+				for j := 0; j < n; j++ {
+					m[j] = j
+				}
+			}
+			reportNsPerKey(b, "put_ns/key", n)
+		})
+	}
+}
+
+// Overwrites of existing keys in a populated dict (no growth, no appends).
+func BenchmarkDictPutOverwrite(b *testing.B) {
+	for _, n := range opSizes {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			d := NewDict[int, int]()
+			for j := 0; j < n; j++ {
+				d.Put(j, j)
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				d.Put(i%n, i)
+			}
+			reportNsPerKey(b, "put_ns/key", 1)
+		})
+	}
+}
+
+func BenchmarkMapPutOverwrite(b *testing.B) {
+	for _, n := range opSizes {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			m := make(map[int]int, n)
+			for j := 0; j < n; j++ {
+				m[j] = j
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				m[i%n] = i
+			}
+			reportNsPerKey(b, "put_ns/key", 1)
+		})
 	}
 }
 
 func BenchmarkDictGet(b *testing.B) {
-	d := NewDict[int, int]()
-	for j := 0; j < 1000; j++ {
-		d.Put(j, j)
+	for _, n := range opSizes {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			d := NewDict[int, int]()
+			for j := 0; j < n; j++ {
+				d.Put(j, j)
+			}
+			b.ResetTimer()
+			var sink int
+			for i := 0; i < b.N; i++ {
+				sink += d.Get(i % n)
+			}
+			b.StopTimer()
+			reportNsPerKey(b, "get_ns/key", 1)
+			_ = sink
+		})
 	}
-	b.ResetTimer()
-	var sink int
-	for i := 0; i < b.N; i++ {
-		sink += d.Get(i % 1000)
-	}
-	_ = sink
 }
 
 func BenchmarkMapGet(b *testing.B) {
-	m := map[int]int{}
-	for j := 0; j < 1000; j++ {
-		m[j] = j
+	for _, n := range opSizes {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			m := make(map[int]int, n)
+			for j := 0; j < n; j++ {
+				m[j] = j
+			}
+			b.ResetTimer()
+			var sink int
+			for i := 0; i < b.N; i++ {
+				sink += m[i%n]
+			}
+			b.StopTimer()
+			reportNsPerKey(b, "get_ns/key", 1)
+			_ = sink
+		})
 	}
-	b.ResetTimer()
-	var sink int
-	for i := 0; i < b.N; i++ {
-		sink += m[i%1000]
-	}
-	_ = sink
+}
+
+// Iteration benchmarks. Each reports iter_ns/key: wall time per key visited,
+// so results are comparable across batch sizes and against the built-in map.
+//
+//	go test -run '^$' -bench 'Iterate' -benchtime=200ms
+var iterSizes = []int{10, 100, 1_000, 10_000, 100_000, 1_000_000}
+
+func reportIterNsPerKey(b *testing.B, keysPerIter int) {
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/(float64(b.N)*float64(keysPerIter)), "iter_ns/key")
 }
 
 func BenchmarkDictIterate(b *testing.B) {
-	d := NewDict[int, int]()
-	for j := 0; j < 1000; j++ {
-		d.Put(j, j)
+	for _, n := range iterSizes {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			d := NewDict[int, int]()
+			for j := 0; j < n; j++ {
+				d.Put(j, j)
+			}
+			b.ResetTimer()
+			var sink int
+			for i := 0; i < b.N; i++ {
+				for _, v := range d.All() {
+					sink += v
+				}
+			}
+			b.StopTimer()
+			reportIterNsPerKey(b, n)
+			_ = sink
+		})
 	}
-	b.ResetTimer()
-	var sink int
-	for i := 0; i < b.N; i++ {
-		for _, v := range d.All() {
-			sink += v
-		}
+}
+
+// Dict with holes: every 4th key of an n*4/3 fill is deleted (about a quarter
+// of the entries array), leaving ~n live keys. This stays well under the
+// compaction threshold, so it measures iteration over a holey entries array.
+func BenchmarkDictIterateWithHoles(b *testing.B) {
+	for _, n := range iterSizes {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			d := NewDict[int, int]()
+			total := n * 4 / 3 // live count after deletes is ~n
+			for j := 0; j < total; j++ {
+				d.Put(j, j)
+			}
+			for j := 0; j < total && d.Len() > n; j += 4 {
+				d.Del(j)
+			}
+			live := d.Len()
+			b.ResetTimer()
+			var sink int
+			for i := 0; i < b.N; i++ {
+				for _, v := range d.All() {
+					sink += v
+				}
+			}
+			b.StopTimer()
+			reportIterNsPerKey(b, live)
+			_ = sink
+		})
 	}
-	_ = sink
+}
+
+func BenchmarkMapIterate(b *testing.B) {
+	for _, n := range iterSizes {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			m := make(map[int]int, n)
+			for j := 0; j < n; j++ {
+				m[j] = j
+			}
+			b.ResetTimer()
+			var sink int
+			for i := 0; i < b.N; i++ {
+				for _, v := range m {
+					sink += v
+				}
+			}
+			b.StopTimer()
+			reportIterNsPerKey(b, n)
+			_ = sink
+		})
+	}
 }
