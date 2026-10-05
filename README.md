@@ -1,11 +1,13 @@
 insdict: deterministic insert-ordered iteration hash table for Golang
 =======
 
-A hash table for Go that iterates in insert-order for deterministic 
+Dict provides a hash table for Go that iterates in insert-order for deterministic 
 (reproducible) range over All(). Just like the Python 3.7+ dict dictionary.
 
+Dict is faster than the built in Go map, especially on iteration (the most common
+operation when using a Dict as a set). For full table scan, we are 10x faster.
 
-# benchmarks versus built-in Go map.
+# benchmarks of this Dict versus the built-in Go map (Map).
 
 ~~~
 $ go test -v -run=xxx -bench=.
