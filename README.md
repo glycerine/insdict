@@ -6,10 +6,10 @@ Dict provides a hash table for Go that iterates in insert-order for deterministi
 
 We now use int64 indexes so that Dict size is not limited to 2^31.
 
-In terms of performance, the common full table scans over All() are 5-10x faster than the built-in
+In terms of performance, the common full table scans over All() are 5-20x faster than the built-in
 go map. Our point operations are tied or slightly faster than the built-in map. Benchmarks follow.
 
-# Why our Dict full scans are up to 10x faster than map.
+# Why our Dict range All() scans are so much faster than Go's built-in map.
 
 Dict stores entries in one contiguous array, separate from its hash index.
 All() walks that array in insertion order; Go inlines the iterator and its
@@ -37,7 +37,7 @@ matched benchmarks. The
 [Go runtime's iteration discussion](https://github.com/golang/go/blob/go1.26.4/src/internal/runtime/maps/map.go#L134-L175)
 explains its more demanding mutation semantics.
 
-# memory overhead is about 1.7x
+# Dict memory overhead is about 1.3x to 1.7x
 
 For 1,000,000 map[int]int entries vs Dict, heap after GC:
 
