@@ -329,8 +329,14 @@ func (d *Dict[K, V]) Del(k K) bool {
 
 // Pack may vacuum and re-pack the underlying array, removing tombstones.
 // If force is false then heuristics are used, currenly 75% tombstones,
-// to decide whether to re-pack. If force is true then we always repack.
+// to decide whether to re-pack. If force is true then we always repack
+// if there is a single tombstone. If there are no tombstones then
+// Pack is always a no-op.
 func (d *Dict[K, V]) Pack(force bool) {
+	if d.live == len(d.entries) {
+		// no tombstones, do nothing.
+		return
+	}
 	if !force && len(d.entries) > 32 && d.live < len(d.entries)/4 {
 		force = true
 	}
@@ -348,9 +354,11 @@ func (d *Dict[K, V]) Pack(force bool) {
 // Put of new keys during All iteration is not recommended. This is not well
 // defined behavior. Put could provoke a resize of the underlying array.
 // The copy to the new larger array will omit tombstones. This will
-// change the index of seen elements. You risk seeing some of the same
-// elements more than once in the iteration, if there were tombstones present before
-// the current iteration point.
+// change the index of seen elements. You risk missing some
+// elements during the iteration, if there were tombstones present before
+// the current iteration point. If you must Put during iteration,
+// be sure to call Pack(true) before staring All so as to force vacuuming out of all
+// tombstones beforehand; omit all Del calls during your pass.
 func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		for i := 0; i < len(d.entries); i++ {

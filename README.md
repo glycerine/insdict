@@ -20,7 +20,11 @@ Go's built-in map scans hash-table slots through a general runtime iterator.
 Each returned entry involves a runtime call, iterator state updates, occupancy
 checks, and checks for table growth and indirect key/value storage. It also
 supports adding entries during iteration, which Dict.All() does
-not promise is well defined (it risks having some elements repeated during iteration).
+not promise is well defined (it risks having some elements missed during iteration
+if there were tombstones prior to the iteration point at which Put is invoked,
+because compaction lowers the index of elements
+that came after a tombstone; see the All docs and 
+force compaction with `Pack(true)` first before staring All).
 
 On Go 1.26.4/linux/amd64, a matched integer-value summation benchmark measured
 about 112 instructions and 25 branches per map entry versus 12 instructions and
