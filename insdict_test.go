@@ -52,13 +52,16 @@ func checkInvariants[K comparable, V any](t testing.TB, d *Dict[K, V]) {
 	t.Helper()
 
 	if d.indices == nil {
-		if d.live != 0 || len(d.entries) != 0 {
+		if d.live != 0 || len(d.entries) != 0 || len(d.tags) != 0 {
 			t.Fatalf("nil indices but live=%d entries=%d", d.live, len(d.entries))
 		}
 		return
 	}
 
 	size := len(d.indices)
+	if len(d.tags) != size {
+		t.Fatalf("tag table size %d does not match index table size %d", len(d.tags), size)
+	}
 	if size < minSize || size&(size-1) != 0 {
 		t.Fatalf("index table size %d is not a power of two >= %d", size, minSize)
 	}
@@ -83,7 +86,7 @@ func checkInvariants[K comparable, V any](t testing.TB, d *Dict[K, V]) {
 		if h := d.hashOf(e.key); h != e.hash {
 			t.Fatalf("entry %d stored hash %x != recomputed %x", i, e.hash, h)
 		}
-		if _, ix := d.find(e.key, e.hash); int(ix) != i {
+		if _, ix := d.find(e.key, e.hash, hashTag(e.hash)); int(ix) != i {
 			t.Fatalf("find(%v) returned ix=%d, want %d", e.key, ix, i)
 		}
 	}
@@ -96,11 +99,20 @@ func checkInvariants[K comparable, V any](t testing.TB, d *Dict[K, V]) {
 		switch {
 		case ix == slotEmpty:
 			empties++
+			if d.tags[slot] != tagEmpty {
+				t.Fatalf("empty slot %d has a tag", slot)
+			}
 		case ix == slotDummy:
+			if d.tags[slot] != tagDummy {
+				t.Fatalf("deleted slot %d has tag %x, want dummy", slot, d.tags[slot])
+			}
 		case ix >= 0:
 			refs++
 			if int(ix) >= len(d.entries) || !d.entries[ix].live {
 				t.Fatalf("slot %d points at bad/dead entry %d", slot, ix)
+			}
+			if want := hashTag(d.entries[ix].hash); d.tags[slot] != want {
+				t.Fatalf("slot %d has tag %x, want %x", slot, d.tags[slot], want)
 			}
 		default:
 			t.Fatalf("slot %d has invalid value %d", slot, ix)
@@ -308,7 +320,8 @@ func TestDeleteZeroesEntryForGC(t *testing.T) {
 	d := NewDict[string, *int]()
 	x := 42
 	d.Put("k", &x)
-	slot, ix := d.find("k", d.hashOf("k"))
+	h := d.hashOf("k")
+	slot, ix := d.find("k", h, hashTag(h))
 	_ = slot
 	d.Del("k")
 	if e := d.entries[ix]; e.live || e.val != nil || e.key != "" || e.hash != 0 {
@@ -669,6 +682,9 @@ func TestDeterministicLayout(t *testing.T) {
 	if !reflect.DeepEqual(a.indices, b.indices) {
 		t.Fatal("index tables differ between identical runs")
 	}
+	if !slices.Equal(a.tags, b.tags) {
+		t.Fatal("tag tables differ between identical runs")
+	}
 	if !reflect.DeepEqual(a.entries, b.entries) {
 		t.Fatal("entry arrays differ between identical runs")
 	}
@@ -758,6 +774,52 @@ func TestPutDuringIteration(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Property-based tests (deterministic seeds, compared against a model)
 // ---------------------------------------------------------------------------
+
+// Exercise false-positive fingerprints and both extremes of the tag encoding
+// while repeatedly growing, compacting, and reusing deleted slots.
+func TestGetFingerprintLifecycle(t *testing.T) {
+	for _, hash := range []func(int) uint64{
+		func(k int) uint64 { return uint64(k)<<8 | 7 },  // distinct hashes, same tag and initial slot
+		func(k int) uint64 { return uint64(k)<<57 | 7 }, // all tags, with full hash collisions
+		func(int) uint64 { return ^uint64(0) },
+	} {
+		d := NewDictFuncSize[int, int](hash, 10)
+		m := newModel[int, int]()
+		for cycle := 0; cycle < 3; cycle++ {
+			for k := 0; k < 200; k++ {
+				d.Put(k, k)
+				m.put(k, k)
+			}
+			checkAgainst(t, d, m)
+			for k := 0; k < 190; k++ {
+				d.Del(k)
+				m.del(k)
+				if got, found := d.Get2(k); found || got != 0 {
+					t.Fatalf("deleted key %d: (%d,%v)", k, got, found)
+				}
+			}
+			checkAgainst(t, d, m)
+			if got, found := d.Get2(1000); found || got != 0 {
+				t.Fatalf("absent key: (%d,%v)", got, found)
+			}
+		}
+	}
+}
+
+func TestGetInterfaceKeys(t *testing.T) {
+	// The integer fast path must retain default hashing's dynamic-type behavior.
+	d := NewDict[any, string]()
+	keys := []any{0, -1, int64(0), uint64(0), "", "a", false, true}
+	for i, k := range keys {
+		d.Put(k, fmt.Sprint(i))
+	}
+	for i, k := range keys {
+		if got, found := d.Get2(k); !found || got != fmt.Sprint(i) {
+			t.Fatalf("key %v (%T): (%q,%v)", k, k, got, found)
+		}
+	}
+	checkInvariants(t, d)
+}
 
 func TestPropertyRandomOpsMatchModel(t *testing.T) {
 	for seed := int64(0); seed < 50; seed++ {
@@ -1131,7 +1193,7 @@ func BenchmarkDictGet(b *testing.B) {
 			}
 			b.StopTimer()
 			reportNsPerKey(b, "get_ns/key", 1)
-			_ = sink
+			benchmarkSink = sink
 		})
 	}
 }
@@ -1150,7 +1212,7 @@ func BenchmarkMapGet(b *testing.B) {
 			}
 			b.StopTimer()
 			reportNsPerKey(b, "get_ns/key", 1)
-			_ = sink
+			benchmarkSink = sink
 		})
 	}
 }
@@ -1181,7 +1243,7 @@ func BenchmarkDictIterate(b *testing.B) {
 			}
 			b.StopTimer()
 			reportIterNsPerKey(b, n)
-			_ = sink
+			benchmarkSink = sink
 		})
 	}
 }
@@ -1210,7 +1272,7 @@ func BenchmarkDictIterateWithHoles(b *testing.B) {
 			}
 			b.StopTimer()
 			reportIterNsPerKey(b, live)
-			_ = sink
+			benchmarkSink = sink
 		})
 	}
 }
@@ -1231,7 +1293,10 @@ func BenchmarkMapIterate(b *testing.B) {
 			}
 			b.StopTimer()
 			reportIterNsPerKey(b, n)
-			_ = sink
+			benchmarkSink = sink
 		})
 	}
 }
+
+// Keep benchmark results observable so scans must read values, not just live flags.
+var benchmarkSink int

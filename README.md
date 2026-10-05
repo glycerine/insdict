@@ -8,9 +8,43 @@ We now use int64 indexes so that Dict size is not limited to 2^31.
 
 Dict with int32 indexes was faster than the built in Go map on all fronts.
 
-With int64 indexes we are tied except on iteration (the most common
-operation when using a Dict as a set). On iteration, also called a full 
-table scan, we are still 10x faster than the built in Go map. 
+Point lookups now use compact hash fingerprints while retaining int64 indexes.
+Iteration, also called a full table scan, still traverses dense entries in
+insertion order and remains much faster than the built-in Go map. Relative
+lookup performance depends on table size and hit rate; see the measurements below.
+
+# Point lookup optimization
+
+`Get` and `Get2` now check a compact control byte before reading the int64
+index or entry. Each occupied control byte contains a 7-bit hash fingerprint;
+empty and deleted slots have separate markers. Full hash and key comparisons
+still verify matches. The common `int` lookup hashes inline, and values return
+directly from the matching entry. Insertion order, hash functions, and the full
+int64 index range are preserved.
+
+CPU-pinned random point lookups on Go 1.26.4, linux/amd64, Ryzen Threadripper
+3960X gave these median times. Each operation is one lookup, with queries
+generated before timing; these differ from the sequential benchmarks below.
+
+| Integer lookup | Before (ns) | After (ns) | Go map (ns) |
+| --- | ---: | ---: | ---: |
+| Hit, 1,024 entries | 11.30 | 6.57 | 8.86 |
+| Hit, 16,384 entries | 18.59 | 12.00 | 10.99 |
+| Hit, 1,048,576 entries | 157.30 | 103.60 | 68.21 |
+| Miss, 1,048,576 entries | 108.40 | 20.07 | 64.95 |
+
+The metadata costs one byte per index slot, one additional allocation per
+rebuild, and 24 bytes per Dict header on amd64. For the large integer table,
+allocated backing-array memory increases about 3.4%. Small insertion benchmarks
+were about 3–6% slower; large inserts and overwrites improved. The entry layout
+and `All` loop are unchanged. Isolated scans consuming values measured about
+707 ns per 1,000 entries before and after; million-entry scans remained around
+1.9 ms.
+
+The point benchmarks include hits, misses, mixed queries, string keys, and
+`Get2`. Existing lookup/scan benchmarks now retain their sums in a global sink
+so the compiler cannot discard value reads. See [get_profile.txt](get_profile.txt)
+for profiling evidence, detailed results, and reproduction commands.
 
 # benchmarks of this Dict versus the built-in Go map (Map).
 

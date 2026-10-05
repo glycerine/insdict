@@ -1,0 +1,478 @@
+Implemented optimization -- follow-up results, 2026-10-05
+=========================================================
+
+Production changes in insdict.go:
+- Get2 fuses hashing, probing, and the value return; Get delegates to Get2.
+- Common int keys use inline Mix64, preserving default hashes and custom hash
+  precedence. Other supported key types still use defaultHash.
+- One control byte per index slot: 0=empty, 1=deleted, 128..255=occupied with
+  the high seven hash bits in the low seven control bits.
+- Lookup checks control bytes FIRST. Most mismatched fingerprints and absent
+  lookups never access the int64 indexes or entry array. Matching fingerprints
+  still require full hash and key equality. Tombstones continue the probe.
+- Put, Del, and rebuild maintain both metadata and indexes. Write probing uses
+  the same filtering; passing the precomputed tag keeps find inlineable (cost
+  74 under the compiler's budget of 80).
+- Dense entries, their field layout, hash values, probe sequence, and insertion
+  order remain unchanged. The tags slice follows the existing Dict fields.
+
+Final pinned integer point-lookups (five repeats, median ns/op):
+Entries / workload            Original Dict  Optimized Dict  Go map
+1,024 hit                          11.30            6.57       8.86
+16,384 hit                         18.59           12.00      10.99
+1,048,576 hit                     157.30          103.60      68.21
+1,048,576 miss                    108.40           20.07      64.95
+
+Integer hit improvements: about 42%, 35%, and 34% respectively. Million-entry
+misses improve about 81%. Medium/large hits remain slower than native maps.
+Get2 is also measured, consuming its found flag; see controls-int.txt summary.
+String hit/miss medians at 1,048,576 entries: 359.6/35.54 ns, versus original
+412.6/156.0 ns and native map 155.0/89.44 ns. Strings retain xxhash hashing.
+The string run precedes the final inlineable write-loop edit, which changes
+construction but does not change the timed Get implementation.
+
+Tradeoffs:
+One byte per index slot, an extra 24-byte slice header on amd64, and one extra
+allocation per rebuild. Presized 1,000-entry construction grows 3 -> 4 allocs;
+grown million-entry construction grows 38 -> 57 allocs. Small inserts slowed
+about 3-6% in these runs; million-entry grown/presized insertion improved about
+22%/19%, and large overwrites improved about 33%. All lookup leaves remain
+allocation-free. The million-entry integer backing arrays grow 58.67 -> 60.67
+MiB (3.4%); string payload/query memory is excluded from that metric.
+
+Scan verification:
+All and entry layout were not changed. Fixed the existing benchmark sinks:
+compiler disassembly showed the original discarded sums also discarded value
+reads. Original and optimized code were compared with the SAME corrected sinks
+using an isolated copy of the original production source under /tmp.
+The existing inlined small scan moved 477 -> 706 ns/1,000 entries; its surrounding
+stack frame and instruction alignment change when Dict grows. An added noinline
+sumDictForBenchmark isolates the scan from construction and has matching loop
+code generation; those isolated small scans are essentially equal (~706/707 ns).
+Million-entry corrected existing scans differed about 1%; isolated scans are
+roughly 1.9 ms in both versions. Thus small inline benchmark timing is sensitive
+to caller code generation; it is not a universal 48% iteration slowdown.
+Both sets of scan measurements are preserved below rather than hiding this.
+
+Validation:
+go test ./... and go vet ./... passed. Four fuzz targets each ran for five
+seconds (six seconds wall time including completion), all passed:
+FuzzDictOps (72,646 executions), FuzzDictOpsCollidingHash (39,227),
+FuzzDictOpsConstantHash (36,506), FuzzDictStringKeys (11,879).
+Extended existing invariant checks cover tag/index agreement, empty/deleted
+markers, and deterministic metadata layout. Added collision/reuse/compaction
+lifecycle tests, extreme fingerprints, and mixed dynamic interface key types.
+
+Post-change profiling:
+final2.test is the binary matching optimized.cpu. It profiles million-entry
+hits AND misses together (5s leaves), so its percentages are not directly
+comparable to the earlier hit-only profile. Get2 accounts for 87.14% flat /
+89.72% cumulative of all samples, with time around control/index/entry reads.
+The generic hashOf/defaultHash call chain is gone from the integer Get hot path.
+Raw profile, annotated source, benchmark files, and binaries are under
+/tmp/insdict-get-profile/. These files are temporary; summaries below persist.
+
+Reproduce final point measurements:
+go test -c -o /tmp/insdict-final.test
+taskset -c 2 /tmp/insdict-final.test -test.run '^$' -test.bench '^BenchmarkPointGetInt$/^n=(1024|16384|1048576)$/^grown$/^(hit|miss)$/^(Dict|Map)$' -test.benchtime=300ms -test.count=5 -test.cpu=1
+# Compare scans without construction-dependent code generation:
+taskset -c 2 /tmp/insdict-final.test -test.run '^$' -test.bench '^BenchmarkDictScanValues$' -test.benchtime=400ms -test.count=5 -test.cpu=1
+# Profiling uses the same flags, with individual leaves and -test.cpuprofile.
+go tool pprof -top /tmp/insdict-get-profile/final2.test /tmp/insdict-get-profile/optimized.cpu
+
+
+final2-int.txt -- median [min, max] ns/op (repetitions)
+BenchmarkPointGetInt/n=1024/grown/hit/Dict                               6.572 [6.550, 6.603] (5)
+BenchmarkPointGetInt/n=1024/grown/hit/Map                                8.857 [8.852, 8.862] (5)
+BenchmarkPointGetInt/n=1024/grown/miss/Dict                              5.910 [5.809, 5.947] (5)
+BenchmarkPointGetInt/n=1024/grown/miss/Map                               8.482 [8.478, 8.487] (5)
+BenchmarkPointGetInt/n=16384/grown/hit/Dict                             12.000 [11.960, 12.080] (5)
+BenchmarkPointGetInt/n=16384/grown/hit/Map                              10.990 [10.980, 11.000] (5)
+BenchmarkPointGetInt/n=16384/grown/miss/Dict                            13.070 [13.040, 13.110] (5)
+BenchmarkPointGetInt/n=16384/grown/miss/Map                             10.010 [9.989, 10.010] (5)
+BenchmarkPointGetInt/n=1048576/grown/hit/Dict                          103.600 [103.600, 103.900] (5)
+BenchmarkPointGetInt/n=1048576/grown/hit/Map                            68.210 [68.090, 68.220] (5)
+BenchmarkPointGetInt/n=1048576/grown/miss/Dict                          20.070 [20.040, 20.110] (5)
+BenchmarkPointGetInt/n=1048576/grown/miss/Map                           64.950 [64.840, 64.970] (5)
+
+controls-int.txt -- median [min, max] ns/op (repetitions)
+BenchmarkPointGetInt/n=1024/grown/hit/Dict                               6.737 [6.736, 6.788] (3)
+BenchmarkPointGetInt/n=1024/grown/hit/Dict2                              6.585 [6.579, 6.599] (3)
+BenchmarkPointGetInt/n=1024/grown/hit/Map                                8.953 [8.949, 8.953] (3)
+BenchmarkPointGetInt/n=1024/grown/miss/Dict                              6.089 [6.070, 6.242] (3)
+BenchmarkPointGetInt/n=1024/grown/miss/Dict2                             6.409 [6.352, 6.419] (3)
+BenchmarkPointGetInt/n=1024/grown/miss/Map                               8.561 [8.559, 8.563] (3)
+BenchmarkPointGetInt/n=1024/grown/mixed/Dict                             5.996 [5.955, 6.012] (3)
+BenchmarkPointGetInt/n=1024/grown/mixed/Dict2                            6.117 [6.101, 6.189] (3)
+BenchmarkPointGetInt/n=1024/grown/mixed/Map                              8.925 [8.922, 8.933] (3)
+BenchmarkPointGetInt/n=16384/grown/hit/Dict                             12.040 [12.020, 12.050] (3)
+BenchmarkPointGetInt/n=16384/grown/hit/Dict2                            12.230 [12.220, 12.280] (3)
+BenchmarkPointGetInt/n=16384/grown/hit/Map                              10.970 [10.960, 10.970] (3)
+BenchmarkPointGetInt/n=16384/grown/miss/Dict                            13.370 [13.360, 13.410] (3)
+BenchmarkPointGetInt/n=16384/grown/miss/Dict2                           13.340 [13.320, 13.370] (3)
+BenchmarkPointGetInt/n=16384/grown/miss/Map                              9.916 [9.870, 9.930] (3)
+BenchmarkPointGetInt/n=16384/grown/mixed/Dict                           12.880 [12.880, 12.920] (3)
+BenchmarkPointGetInt/n=16384/grown/mixed/Dict2                          12.890 [12.890, 12.910] (3)
+BenchmarkPointGetInt/n=16384/grown/mixed/Map                            10.990 [10.990, 10.990] (3)
+BenchmarkPointGetInt/n=1048576/grown/hit/Dict                          103.300 [103.200, 103.300] (3)
+BenchmarkPointGetInt/n=1048576/grown/hit/Dict2                         110.100 [110.100, 110.300] (3)
+BenchmarkPointGetInt/n=1048576/grown/hit/Map                            70.040 [69.990, 70.600] (3)
+BenchmarkPointGetInt/n=1048576/grown/miss/Dict                          20.490 [20.480, 20.500] (3)
+BenchmarkPointGetInt/n=1048576/grown/miss/Dict2                         20.410 [20.410, 20.430] (3)
+BenchmarkPointGetInt/n=1048576/grown/miss/Map                           66.980 [66.900, 67.070] (3)
+BenchmarkPointGetInt/n=1048576/grown/mixed/Dict                         78.670 [78.530, 78.670] (3)
+BenchmarkPointGetInt/n=1048576/grown/mixed/Dict2                        82.570 [82.560, 82.580] (3)
+BenchmarkPointGetInt/n=1048576/grown/mixed/Map                          67.930 [67.890, 68.150] (3)
+
+controls-string.txt -- median [min, max] ns/op (repetitions)
+BenchmarkPointGetString/n=1024/grown/hit/Dict                           21.270 [21.270, 21.310] (3)
+BenchmarkPointGetString/n=1024/grown/hit/Map                            15.160 [15.160, 15.160] (3)
+BenchmarkPointGetString/n=1024/grown/miss/Dict                          18.990 [18.930, 19.010] (3)
+BenchmarkPointGetString/n=1024/grown/miss/Map                           10.590 [10.560, 10.610] (3)
+BenchmarkPointGetString/n=16384/grown/hit/Dict                          36.670 [36.660, 36.670] (3)
+BenchmarkPointGetString/n=16384/grown/hit/Map                           22.720 [22.540, 22.740] (3)
+BenchmarkPointGetString/n=16384/grown/miss/Dict                         23.120 [23.120, 23.140] (3)
+BenchmarkPointGetString/n=16384/grown/miss/Map                          14.220 [14.140, 14.250] (3)
+BenchmarkPointGetString/n=1048576/grown/hit/Dict                       359.600 [359.300, 359.800] (3)
+BenchmarkPointGetString/n=1048576/grown/hit/Map                        155.000 [155.000, 155.100] (3)
+BenchmarkPointGetString/n=1048576/grown/miss/Dict                       35.540 [35.520, 35.590] (3)
+BenchmarkPointGetString/n=1048576/grown/miss/Map                        89.440 [89.290, 90.220] (3)
+
+before-writes-iteration.txt -- median [min, max] ns/op (repetitions)
+BenchmarkDictPut/n=1000                                              27840.000 [27758.000, 27911.000] (5)
+BenchmarkDictPut/n=1000000                                        119462372.000 [119007997.000, 132090885.000] (5)
+BenchmarkDictPutPresized/n=1000                                      15548.000 [15526.000, 15706.000] (5)
+BenchmarkDictPutPresized/n=1000000                                78242055.000 [78156184.000, 78328592.000] (5)
+BenchmarkDictPutOverwrite/n=1000                                        10.120 [10.090, 10.170] (5)
+BenchmarkDictPutOverwrite/n=1000000                                     82.100 [81.940, 82.250] (5)
+BenchmarkDictIterate/n=1000                                            579.100 [475.700, 699.200] (5)
+BenchmarkDictIterate/n=1000000                                     1869768.000 [1824603.000, 1889998.000] (5)
+BenchmarkDictIterateWithHoles/n=1000                                   860.200 [855.700, 995.900] (5)
+BenchmarkDictIterateWithHoles/n=1000000                            2537713.000 [2530905.000, 2587506.000] (5)
+
+final2-writes-iteration.txt -- median [min, max] ns/op (repetitions)
+BenchmarkDictPut/n=1000                                              29613.000 [29574.000, 29681.000] (5)
+BenchmarkDictPut/n=1000000                                        93370021.000 [91332781.000, 96836069.000] (5)
+BenchmarkDictPutPresized/n=1000                                      16065.000 [16040.000, 16242.000] (5)
+BenchmarkDictPutPresized/n=1000000                                63468942.000 [63280806.000, 67726099.000] (5)
+BenchmarkDictPutOverwrite/n=1000                                         9.986 [9.976, 10.020] (5)
+BenchmarkDictPutOverwrite/n=1000000                                     54.820 [54.680, 54.900] (5)
+BenchmarkDictIterate/n=1000                                            699.300 [470.300, 699.800] (5)
+BenchmarkDictIterate/n=1000000                                     1827221.000 [1823426.000, 1829725.000] (5)
+BenchmarkDictIterateWithHoles/n=1000                                   861.300 [858.800, 868.300] (5)
+BenchmarkDictIterateWithHoles/n=1000000                            2442347.000 [2438755.000, 2454201.000] (5)
+
+scans-before.txt -- median [min, max] ns/op (repetitions)
+BenchmarkDictIterate/n=1000                                            477.100 [475.000, 479.400] (5)
+BenchmarkDictIterate/n=1000000                                     1907732.000 [1905908.000, 1994508.000] (5)
+BenchmarkDictIterateWithHoles/n=1000                                   861.600 [860.300, 866.300] (5)
+BenchmarkDictIterateWithHoles/n=1000000                            2542939.000 [2536681.000, 2638850.000] (5)
+BenchmarkMapIterate/n=1000                                            8969.000 [8944.000, 9065.000] (5)
+BenchmarkMapIterate/n=1000000                                     10477430.000 [10440039.000, 10624062.000] (5)
+
+scans-after.txt -- median [min, max] ns/op (repetitions)
+BenchmarkDictIterate/n=1000                                            706.000 [620.300, 707.000] (5)
+BenchmarkDictIterate/n=1000000                                     1920271.000 [1919142.000, 1935283.000] (5)
+BenchmarkDictIterateWithHoles/n=1000                                   791.700 [778.000, 804.900] (5)
+BenchmarkDictIterateWithHoles/n=1000000                            2572695.000 [2562184.000, 2580578.000] (5)
+BenchmarkMapIterate/n=1000                                            9096.000 [8995.000, 9230.000] (5)
+BenchmarkMapIterate/n=1000000                                     10504808.000 [10427524.000, 10579777.000] (5)
+
+scans-isolated-before.txt -- median [min, max] ns/op (repetitions)
+BenchmarkDictScanValues/n=1000/holes=false                             705.600 [501.100, 706.800] (5)
+BenchmarkDictScanValues/n=1000/holes=true                              644.000 [643.800, 644.100] (5)
+BenchmarkDictScanValues/n=1000000/holes=false                      1943781.000 [1940013.000, 1947971.000] (5)
+BenchmarkDictScanValues/n=1000000/holes=true                       1912913.000 [1908778.000, 1915342.000] (5)
+
+scans-isolated-after.txt -- median [min, max] ns/op (repetitions)
+BenchmarkDictScanValues/n=1000/holes=false                             707.000 [492.600, 707.500] (5)
+BenchmarkDictScanValues/n=1000/holes=true                              645.600 [645.100, 645.900] (5)
+BenchmarkDictScanValues/n=1000000/holes=false                      1869859.000 [1866996.000, 1877260.000] (5)
+BenchmarkDictScanValues/n=1000000/holes=true                       1868996.000 [1863617.000, 1923226.000] (5)
+
+
+Historical investigation BEFORE production optimization
+======================================================
+The following section describes the earlier baseline and benchmark-only
+candidates; its statement that production is unchanged applies to that stage.
+
+Get performance investigation -- 2026-10-05
+============================================
+
+Environment: Go 1.26.4, linux/amd64, AMD Ryzen Threadripper 3960X.
+Repeated comparisons below use one Go execution thread (-cpu=1), pinned to
+CPU 2 with taskset. These are exploratory medians, not statistical claims.
+CPU profiles were collected separately, without CPU pinning or concurrent
+benchmarks. Source attribution remains valid; absolute profile-run timings
+are not directly comparable to the pinned measurements.
+
+Changes: get_bench_test.go adds point-Get benchmarks and three test-only
+candidates. insdict.go and the existing README benchmarks are unchanged.
+Validation: go test ./... passed, including comparisons of the candidates
+with production Get for empty dictionaries, present/absent keys, zero values,
+tombstones, strings, custom hashes, and a constant collision hash.
+
+Benchmark design
+----------------
+Each operation performs one value-only point lookup. Integer and 20-byte
+string keys are tested at 1,024, 16,384, and 1,048,576 stored entries. Queries
+are a deterministic shuffled permutation covering n distinct keys per cycle,
+not a small hot query ring. Hits visit all stored keys. Misses use disjoint
+keys. Mixed queries alternate hits and misses (50% each). String queries use
+distinct storage from stored keys, so hits require actual string equality.
+All query generation, hashing for probe statistics, construction, and tag
+construction happen outside timing. The loop uses a mask instead of division;
+the accumulated lookup results escape through a package-level sink.
+
+Grown tables have 50% index occupancy at these sizes. Sparse tables are
+rebuilt with twice the slots (25% occupancy). Reported table_B includes
+allocated index and entry backing arrays, plus sidecar tags for Tagged.
+It excludes key payload allocations, queries, dictionary header, and Go map
+memory. In this implementation sparse rebuilding also doubles entry capacity;
+it is a memory/latency experiment, not a recommended production setting.
+All measured lookup leaves reported zero allocations.
+
+Candidates
+----------
+Fused: generic value-only lookup, with hash selection in the lookup routine
+and a direct return from the matched entry. Removes the hashOf call and
+repeated entry indexing/bounds checking. Retains defaultHash and the original
+probe sequence, hash/key verification, custom hashing, and int64 indices.
+
+TypedInt: concrete int/int version of Fused, with inline Mix64 hashing.
+Removes the generic defaultHash call/type switch and changes code generation.
+It is an upper-bound experiment for specialization, not a drop-in generic
+API change. The benefits cannot all be attributed to type-switch instructions
+alone; generated code can change scheduling and memory-latency overlap.
+
+Tagged: generic Fused lookup plus one byte per index slot containing the high
+8 hash bits. The existing index handles empty/deleted status; a tag mismatch
+rejects a collision before reading entries[ix]. Full hash/key verification
+still follows a tag match. This preserves full int64 indexes and the original
+probe sequence. Tags are constructed from the populated table for this read-only
+experiment; production adoption would require maintenance in Put/Del/rebuild.
+
+Key results (median ns per lookup, pinned)
+-----------------------------------------
+Integer hits               Dict    Map     Fused   TypedInt   Tagged
+1,024                      11.30    8.81     8.58      5.72      8.69
+16,384                     18.59   10.84    16.71     13.45     14.47
+1,048,576                 157.30   69.81   155.00    118.50    120.00
+
+The generic fused path improves small hits about 24%, medium hits about 10%,
+and large hits only about 1.5%. TypedInt improves hits about 49%, 28%, and 25%.
+Tagged improves medium/large hits about 22%/24%; its small-table result is
+essentially the Fused gain, rather than an additional fingerprint benefit.
+For million-entry integer misses, Dict=108.40, Map=65.32, Tagged=61.12;
+Tagged improves about 44%. Million-entry mixed: Dict=138.60, Tagged=106.00.
+
+At 50% occupancy, the million-entry integer table allocates 58.67 MiB;
+fingerprints add 2 MiB (about 3.4%). Average probes are 1.388 for integer hits
+and about 2 for misses. Ordinary hits inspect an entry at every occupied
+probe; tags should reduce this toward one entry read per hit, and nearly zero
+for misses, assuming well-distributed fingerprint bits. This is an explanation
+of the expected mechanism, not a measured hardware cache-miss count.
+
+pprof findings
+--------------
+Small integer hits (1,024): hashOf including defaultHash accounts for 38.31%
+of total CPU samples; defaultHash including Mix64 is 30.61%; find is 44.99%.
+These cumulative percentages overlap and must not be added. Compiler output
+shows Get and find inline, while Get2, hashOf, and defaultHash do not inline.
+The defaultHash type switch remains in compiled integer lookup code.
+
+Large integer hits: find has 94.68% of total samples. About 3.63 seconds are
+at the empty-slot check, and 6.74 seconds at the entry hash/key check, out of
+11.08 seconds sampled. pprof -disasm shows the hot instructions are comparisons
+immediately following the index and entry-hash loads; the integer key comparison
+itself gets almost no samples. This strongly suggests dependent memory latency,
+not expensive integer equality. CPU sampling alone does not prove cache misses;
+hardware counters would be needed to quantify them. About 4% of this profile
+is construction/probe instrumentation, since CPU profiling includes untimed setup.
+
+String hits (16,384): find has 64.60% flat / 86.69% cumulative; memeqbody 21.94%;
+xxhash.Sum64 4.46%. A wholesale replacement of xxhash would not address the main
+cost of this workload. Longer strings could change that conclusion.
+
+Recommendations, in order
+-------------------------
+1. Prototype the generic fused lookup in production, especially removing the
+   hashOf boundary and repeated entry indexing. It already matches/slightly
+   beats Go map for small integer hits without changing table layout. Preserve
+   Get2's presence flag and validate both APIs: the measured candidates return
+   only values, and their exact speedups need not transfer to a Get2 rewrite.
+
+2. For large-table Gets, add fingerprints to the index structure. The scalar
+   sidecar already gives useful hit/miss gains and preserves int64 capacity.
+   Then investigate grouped control bytes (8 slots at a time) to reduce branch
+   and scattered probing costs further. The installed Go runtime's map.go and
+   runtime_fast64.go show this approach: hash fingerprints reject most candidates
+   before key access. Keep dense insertion-ordered entries for All(). Grouped
+   probing can coexist with that entry array, but its write-path cost and
+   iteration/cache impact need measurement; the scalar candidate proves only
+   the simpler read-only filtering approach.
+
+3. Consider an integer hashing fast path or optional concrete specialization.
+   TypedInt shows substantial headroom. Merely caching a func(K) uint64 in each
+   Dict removes type dispatch but introduces an indirect call, so benchmark it
+   before choosing it. Preserve custom-hash behavior and the documented panic
+   for unsupported/named default-hash key types. Avoid runtime-internal map
+   hashing/linkname tricks: they complicate stability and deterministic layout.
+
+4. Investigate adaptive 32-bit indexes for small tables with an automatic 64-bit
+   fallback. This can recover the earlier index footprint without limiting the
+   API to 2^31 entries. Branch once before the probe loop; reserve encodings for
+   empty/tombstone slots and promote safely. This idea was not implemented or
+   measured here. Narrow indexes alone cannot remove the index-to-entry dependency.
+
+5. Lower occupancy alone is less attractive. The pinned sparse million-entry
+   Dict improves hits 157.5 -> 144.9 and misses 108.4 -> 88.78 ns, while doubling
+   allocated table capacity. Tagged becomes slower when sparse (hits 120.3 ->
+   132.4; misses 61.12 -> 81.09), illustrating the footprint tradeoff. Prefer
+   filtering first rather than globally increasing table sizes.
+
+Follow-up measurements: combine fusion/fast hashing with tags; include near-2/3
+occupancy, deletion churn/tombstones, other key/value sizes, and another machine.
+Check Put/Del and All performance before adopting an index-layout change.
+The experiments here use insertion-only tables with int values; they do not
+establish universal speedups or production write-path costs.
+
+Reproduction
+------------
+# Benchmarks: choose individual workloads/implementations to shorten runs.
+go test -c -o /tmp/insdict-get.test
+taskset -c 2 /tmp/insdict-get.test -test.run '^$' -test.bench '^BenchmarkPointGetInt$/^n=(1024|16384|1048576)$/^grown$/^hit$' -test.benchtime=400ms -test.count=5 -test.cpu=1
+taskset -c 2 /tmp/insdict-get.test -test.run '^$' -test.bench '^BenchmarkPointGetInt$/^n=1048576$/^(grown|sparse)$/^(hit|miss|mixed)$/(Dict|Map|Tagged)$' -test.benchtime=300ms -test.count=3 -test.cpu=1
+taskset -c 2 /tmp/insdict-get.test -test.run '^$' -test.bench '^BenchmarkPointGetString$/^n=(16384|1048576)$/^grown$/^(hit|miss)$/(Dict|Map|Tagged)$' -test.benchtime=300ms -test.count=3 -test.cpu=1
+
+# CPU profiling: use an 8-second leaf; change n=1024 to n=1048576 for large tables.
+/tmp/insdict-get.test -test.run '^$' -test.bench '^BenchmarkPointGetInt$/^n=1024$/^grown$/^hit$/^Dict$' -test.benchtime=8s -test.cpu=1 -test.cpuprofile=/tmp/insdict-get.cpu
+go tool pprof -top /tmp/insdict-get.test /tmp/insdict-get.cpu
+go tool pprof -list='Get2|find|hashOf|defaultHash' /tmp/insdict-get.test /tmp/insdict-get.cpu
+go tool pprof -disasm='.*Dict\[go.shape.int,go.shape.int\].*Get2' /tmp/insdict-get.test /tmp/insdict-get.cpu
+# Omit taskset on platforms that do not have it; use an allowed CPU on Linux.
+# Never directly compare timing from a profiled run to an unprofiled run.
+
+Raw profiles, binaries, compiler output, and unpinned runs from this session:
+/tmp/insdict-get-profile/
+point.test is the exact binary matching int-small.cpu, int-large.cpu, string.cpu.
+candidates.test matches the pinned runs; it includes all benchmark candidates.
+The /tmp files are temporary; the medians/ranges and pprof tables below are
+preserved here for review.
+
+pinned-hits.txt -- median [min, max] ns/op (repetitions)
+BenchmarkPointGetInt/n=1024/grown/hit/Dict                          11.300 [11.290, 11.390] (5)
+BenchmarkPointGetInt/n=1024/grown/hit/Map                            8.812 [8.804, 8.813] (5)
+BenchmarkPointGetInt/n=1024/grown/hit/Fused                          8.576 [8.566, 8.587] (5)
+BenchmarkPointGetInt/n=1024/grown/hit/TypedInt                       5.722 [5.715, 5.759] (5)
+BenchmarkPointGetInt/n=1024/grown/hit/Tagged                         8.693 [8.664, 8.711] (5)
+BenchmarkPointGetInt/n=16384/grown/hit/Dict                         18.590 [18.580, 18.610] (5)
+BenchmarkPointGetInt/n=16384/grown/hit/Map                          10.840 [10.840, 10.840] (5)
+BenchmarkPointGetInt/n=16384/grown/hit/Fused                        16.710 [16.700, 16.750] (5)
+BenchmarkPointGetInt/n=16384/grown/hit/TypedInt                     13.450 [13.440, 13.480] (5)
+BenchmarkPointGetInt/n=16384/grown/hit/Tagged                       14.470 [14.460, 14.500] (5)
+BenchmarkPointGetInt/n=1048576/grown/hit/Dict                      157.300 [157.300, 157.500] (5)
+BenchmarkPointGetInt/n=1048576/grown/hit/Map                        69.810 [69.690, 69.850] (5)
+BenchmarkPointGetInt/n=1048576/grown/hit/Fused                     155.000 [154.600, 155.200] (5)
+BenchmarkPointGetInt/n=1048576/grown/hit/TypedInt                  118.500 [118.500, 118.600] (5)
+BenchmarkPointGetInt/n=1048576/grown/hit/Tagged                    120.000 [119.900, 120.300] (5)
+
+pinned-large.txt -- median [min, max] ns/op (repetitions)
+BenchmarkPointGetInt/n=1048576/grown/hit/Dict                      157.500 [157.200, 157.600] (3)
+BenchmarkPointGetInt/n=1048576/grown/hit/Map                        68.010 [67.990, 68.050] (3)
+BenchmarkPointGetInt/n=1048576/grown/hit/Tagged                    120.300 [120.200, 120.300] (3)
+BenchmarkPointGetInt/n=1048576/grown/miss/Dict                     108.400 [108.200, 108.500] (3)
+BenchmarkPointGetInt/n=1048576/grown/miss/Map                       65.320 [65.120, 65.330] (3)
+BenchmarkPointGetInt/n=1048576/grown/miss/Tagged                    61.120 [61.090, 61.220] (3)
+BenchmarkPointGetInt/n=1048576/grown/mixed/Dict                    138.600 [138.500, 139.100] (3)
+BenchmarkPointGetInt/n=1048576/grown/mixed/Map                      65.970 [65.940, 66.100] (3)
+BenchmarkPointGetInt/n=1048576/grown/mixed/Tagged                  106.000 [105.700, 110.700] (3)
+BenchmarkPointGetInt/n=1048576/sparse/hit/Dict                     144.900 [144.700, 145.500] (3)
+BenchmarkPointGetInt/n=1048576/sparse/hit/Map                       68.040 [67.990, 68.080] (3)
+BenchmarkPointGetInt/n=1048576/sparse/hit/Tagged                   132.400 [132.400, 132.400] (3)
+BenchmarkPointGetInt/n=1048576/sparse/miss/Dict                     88.780 [88.740, 88.850] (3)
+BenchmarkPointGetInt/n=1048576/sparse/miss/Map                      65.310 [65.270, 65.330] (3)
+BenchmarkPointGetInt/n=1048576/sparse/miss/Tagged                   81.090 [81.060, 81.130] (3)
+BenchmarkPointGetInt/n=1048576/sparse/mixed/Dict                   129.900 [129.800, 130.000] (3)
+BenchmarkPointGetInt/n=1048576/sparse/mixed/Map                     66.060 [65.950, 66.080] (3)
+BenchmarkPointGetInt/n=1048576/sparse/mixed/Tagged                 122.900 [122.700, 123.300] (3)
+
+pinned-string.txt -- median [min, max] ns/op (repetitions)
+BenchmarkPointGetString/n=16384/grown/hit/Dict                      42.360 [42.210, 42.470] (3)
+BenchmarkPointGetString/n=16384/grown/hit/Map                       22.670 [22.660, 22.670] (3)
+BenchmarkPointGetString/n=16384/grown/hit/Tagged                    35.810 [35.750, 35.870] (3)
+BenchmarkPointGetString/n=16384/grown/miss/Dict                     28.700 [28.580, 28.700] (3)
+BenchmarkPointGetString/n=16384/grown/miss/Map                      14.190 [14.190, 14.270] (3)
+BenchmarkPointGetString/n=16384/grown/miss/Tagged                   25.260 [25.250, 25.260] (3)
+BenchmarkPointGetString/n=1048576/grown/hit/Dict                   412.600 [411.900, 412.800] (3)
+BenchmarkPointGetString/n=1048576/grown/hit/Map                    153.200 [152.900, 153.300] (3)
+BenchmarkPointGetString/n=1048576/grown/hit/Tagged                 357.500 [357.400, 357.900] (3)
+BenchmarkPointGetString/n=1048576/grown/miss/Dict                  156.000 [155.900, 156.000] (3)
+BenchmarkPointGetString/n=1048576/grown/miss/Map                    87.680 [87.520, 87.700] (3)
+BenchmarkPointGetString/n=1048576/grown/miss/Tagged                 95.990 [95.930, 96.230] (3)
+
+int-small-top.txt
+File: point.test
+Build ID: cc985860afb6a1ef611b60aa416df7892644e4c6
+Type: cpu
+Time: 2026-10-05 00:21:11 CDT
+Duration: 10.78s, Total samples = 10780ms (  100%)
+Showing nodes accounting for 10770ms, 99.91% of 10780ms total
+Dropped 7 nodes (cum <= 53.90ms)
+      flat  flat%   sum%        cum   cum%
+    4850ms 44.99% 44.99%     4850ms 44.99%  github.com/glycerine/insdict.(*Dict[go.shape.int,go.shape.int]).find (inline)
+    2820ms 26.16% 71.15%     3300ms 30.61%  github.com/glycerine/insdict.defaultHash[go.shape.int]
+     880ms  8.16% 79.31%    10770ms 99.91%  github.com/glycerine/insdict.benchmarkPointGet[go.shape.int].func1.1.1.1
+     830ms  7.70% 87.01%     4130ms 38.31%  github.com/glycerine/insdict.(*Dict[go.shape.int,go.shape.int]).hashOf
+     750ms  6.96% 93.97%     9730ms 90.26%  github.com/glycerine/insdict.(*Dict[go.shape.int,go.shape.int]).Get2
+     480ms  4.45% 98.42%      480ms  4.45%  github.com/glycerine/insdict.Mix64 (inline)
+     160ms  1.48% 99.91%     9890ms 91.74%  github.com/glycerine/insdict.(*Dict[go.shape.int,go.shape.int]).Get (inline)
+         0     0% 99.91%    10770ms 99.91%  testing.(*B).launch
+         0     0% 99.91%    10770ms 99.91%  testing.(*B).runN
+
+int-large-top.txt
+File: point.test
+Build ID: cc985860afb6a1ef611b60aa416df7892644e4c6
+Type: cpu
+Time: 2026-10-05 00:21:22 CDT
+Duration: 11.09s, Total samples = 11.08s (99.94%)
+Showing nodes accounting for 11.02s, 99.46% of 11.08s total
+Dropped 19 nodes (cum <= 0.06s)
+      flat  flat%   sum%        cum   cum%
+    10.49s 94.68% 94.68%     10.49s 94.68%  github.com/glycerine/insdict.(*Dict[go.shape.int,go.shape.int]).find (inline)
+     0.16s  1.44% 96.12%      0.16s  1.44%  github.com/glycerine/insdict.pointGetProbes[go.shape.int]
+     0.09s  0.81% 96.93%      0.09s  0.81%  internal/runtime/maps.ctrlGroup.matchH2 (inline)
+     0.07s  0.63% 97.56%     10.59s 95.58%  github.com/glycerine/insdict.benchmarkPointGet[go.shape.int].func1.1.1.1
+     0.06s  0.54% 98.10%      0.06s  0.54%  github.com/glycerine/insdict.defaultHash[go.shape.int]
+     0.05s  0.45% 98.56%      0.07s  0.63%  github.com/glycerine/insdict.(*Dict[go.shape.int,go.shape.int]).rebuild
+     0.04s  0.36% 98.92%      0.10s   0.9%  github.com/glycerine/insdict.(*Dict[go.shape.int,go.shape.int]).hashOf
+     0.03s  0.27% 99.19%     10.50s 94.77%  github.com/glycerine/insdict.(*Dict[go.shape.int,go.shape.int]).Get2
+     0.02s  0.18% 99.37%     10.52s 94.95%  github.com/glycerine/insdict.(*Dict[go.shape.int,go.shape.int]).Get (inline)
+     0.01s  0.09% 99.46%      0.32s  2.89%  github.com/glycerine/insdict.benchmarkPointGet[go.shape.int].func1.1
+         0     0% 99.46%      0.19s  1.71%  github.com/glycerine/insdict.(*Dict[go.shape.int,go.shape.int]).Put
+         0     0% 99.46%      0.16s  1.44%  github.com/glycerine/insdict.benchmarkPointGet[go.shape.int].func1.1.1
+         0     0% 99.46%      0.09s  0.81%  runtime.mapassign_fast64
+         0     0% 99.46%     10.59s 95.58%  testing.(*B).launch
+         0     0% 99.46%      0.48s  4.33%  testing.(*B).run1.func1
+         0     0% 99.46%     11.07s 99.91%  testing.(*B).runN
+
+string-top.txt
+File: point.test
+Build ID: cc985860afb6a1ef611b60aa416df7892644e4c6
+Type: cpu
+Time: 2026-10-05 00:21:33 CDT
+Duration: 13.91s, Total samples = 13.90s (99.93%)
+Showing nodes accounting for 13.86s, 99.71% of 13.90s total
+Dropped 13 nodes (cum <= 0.07s)
+      flat  flat%   sum%        cum   cum%
+     8.98s 64.60% 64.60%     12.05s 86.69%  github.com/glycerine/insdict.(*Dict[go.shape.string,go.shape.int]).find (inline)
+     3.05s 21.94% 86.55%      3.05s 21.94%  memeqbody
+     0.62s  4.46% 91.01%      0.62s  4.46%  github.com/cespare/xxhash/v2.Sum64
+     0.44s  3.17% 94.17%      1.15s  8.27%  github.com/glycerine/insdict.defaultHash[go.shape.string]
+     0.28s  2.01% 96.19%     13.88s 99.86%  github.com/glycerine/insdict.benchmarkPointGet[go.shape.string].func1.1.1.1
+     0.21s  1.51% 97.70%     13.58s 97.70%  github.com/glycerine/insdict.(*Dict[go.shape.string,go.shape.int]).Get2
+     0.17s  1.22% 98.92%      1.32s  9.50%  github.com/glycerine/insdict.(*Dict[go.shape.string,go.shape.int]).hashOf
+     0.09s  0.65% 99.57%      0.71s  5.11%  github.com/cespare/xxhash/v2.Sum64String (inline)
+     0.02s  0.14% 99.71%     13.60s 97.84%  github.com/glycerine/insdict.(*Dict[go.shape.string,go.shape.int]).Get (inline)
+         0     0% 99.71%     13.88s 99.86%  testing.(*B).launch
+         0     0% 99.71%     13.89s 99.93%  testing.(*B).runN

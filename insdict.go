@@ -10,6 +10,9 @@ const (
 	slotEmpty int64 = -1
 	slotDummy int64 = -2
 	minSize         = 8 // power of two
+	tagEmpty  byte  = 0
+	tagDummy  byte  = 1
+	tagUsed   byte  = 0x80
 )
 
 type entry[K comparable, V any] struct {
@@ -28,6 +31,7 @@ type Dict[K comparable, V any] struct {
 	entries []entry[K, V]  // dense, insertion-ordered, may contain holes
 	live    int            // live entry count
 	mask    uint64
+	tags    []byte // empty, dummy, or tagUsed | high 7 hash bits
 }
 
 func NewDict[K comparable, V any]() *Dict[K, V] {
@@ -128,24 +132,47 @@ func (d *Dict[K, V]) Get2(k K) (v V, found bool) {
 	if d.live == 0 {
 		return
 	}
-	h := d.hashOf(k)
-	_, ix := d.find(k, h)
-	if ix < 0 {
-		return
+	var h uint64
+	if d.hash != nil {
+		h = d.hash(k)
+	} else if v, ok := any(k).(int); ok {
+		// Keep the common integer hash inline instead of dispatching through
+		// hashOf and the full defaultHash type switch on every lookup.
+		h = Mix64(uint64(v))
+	} else {
+		h = defaultHash(k)
 	}
-	return d.entries[ix].val, true
-}
-
-// find returns the indices slot and entries index for k, or ix == -1 and the
-// empty slot where the probe ended if k is absent. Requires d.indices != nil.
-func (d *Dict[K, V]) find(k K, h uint64) (slot int, ix int64) {
+	tag := hashTag(h)
 	i, perturb := h&d.mask, h
 	for {
-		ix = d.indices[i]
-		if ix == slotEmpty {
-			return int(i), -1
+		// Check compact metadata first: most misses never read either array.
+		ctrl := d.tags[i]
+		if ctrl == tag {
+			ix := d.indices[i]
+			e := &d.entries[ix]
+			if e.hash == h && e.key == k {
+				return e.val, true
+			}
+		} else if ctrl == tagEmpty {
+			return
 		}
-		if ix >= 0 {
+		perturb >>= 5
+		i = (i*5 + perturb + 1) & d.mask
+	}
+}
+
+// Occupied tags use the high bit to distinguish them from empty and dummy
+// slots. Use hash bits independent of the low bits selecting the initial slot.
+func hashTag(h uint64) byte { return tagUsed | byte(h>>57) }
+
+// find returns the indices slot and entries index for k, or ix == -1 and the
+// empty slot where the probe ended if k is absent. Requires d.indices != nil
+// and tag == hashTag(h). Passing the tag keeps this probe loop inlineable.
+func (d *Dict[K, V]) find(k K, h uint64, tag byte) (slot int, ix int64) {
+	i, perturb := h&d.mask, h
+	for d.tags[i] != tagEmpty {
+		if d.tags[i] == tag {
+			ix = d.indices[i]
 			e := &d.entries[ix]
 			if e.hash == h && e.key == k {
 				return int(i), ix
@@ -154,6 +181,7 @@ func (d *Dict[K, V]) find(k K, h uint64) (slot int, ix int64) {
 		perturb >>= 5
 		i = (i*5 + perturb + 1) & d.mask
 	}
+	return int(i), -1
 }
 
 // entries capacity is 2/3 of the index table, counting holes
@@ -174,6 +202,7 @@ func (d *Dict[K, V]) freeSlot(h uint64) uint64 {
 func (d *Dict[K, V]) rebuild(size int) {
 	old := d.entries
 	d.indices = make([]int64, size)
+	d.tags = make([]byte, size)
 	for i := range d.indices {
 		d.indices[i] = slotEmpty
 	}
@@ -183,7 +212,9 @@ func (d *Dict[K, V]) rebuild(size int) {
 		if !old[i].live {
 			continue
 		}
-		d.indices[d.freeSlot(old[i].hash)] = int64(len(d.entries))
+		slot := d.freeSlot(old[i].hash)
+		d.indices[slot] = int64(len(d.entries))
+		d.tags[slot] = hashTag(old[i].hash)
 		d.entries = append(d.entries, old[i])
 	}
 }
@@ -203,9 +234,10 @@ func (d *Dict[K, V]) Put(k K, v V) {
 		d.rebuild(minSize)
 	}
 	h := d.hashOf(k)
+	tag := hashTag(h)
 
 	// existing key: overwrite in place, order position unchanged
-	if _, ix := d.find(k, h); ix >= 0 {
+	if _, ix := d.find(k, h, tag); ix >= 0 {
 		d.entries[ix].val = v
 		return
 	}
@@ -217,7 +249,9 @@ func (d *Dict[K, V]) Put(k K, v V) {
 
 	ix := int64(len(d.entries))
 	d.entries = append(d.entries, entry[K, V]{hash: h, key: k, val: v, live: true})
-	d.indices[d.freeSlot(h)] = ix
+	slot := d.freeSlot(h)
+	d.indices[slot] = ix
+	d.tags[slot] = tag
 	d.live++
 }
 
@@ -229,12 +263,13 @@ func (d *Dict[K, V]) Del(k K) bool {
 	}
 	h := d.hashOf(k)
 
-	slot, ix := d.find(k, h)
+	slot, ix := d.find(k, h, hashTag(h))
 	if ix < 0 {
 		return false
 	}
 
 	d.indices[slot] = slotDummy
+	d.tags[slot] = tagDummy
 	d.entries[ix] = entry[K, V]{} // zero it so the GC can release K and V
 	d.live--
 
@@ -245,7 +280,7 @@ func (d *Dict[K, V]) Del(k K) bool {
 }
 
 // All iterates entries in insertion order. Do not call Del during iteration
-// (it may compact and renumber entries). Put of new keys during itreation
+// (it may compact and renumber entries). Put of new keys during iteration
 // is also not safe since it too could also provoke a resize.
 func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
