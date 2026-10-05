@@ -9,6 +9,15 @@ We now use int64 indexes so that Dict size is not limited to 2^31.
 In terms of performance, the common full table scans over All() are 5-10x faster than the built-in
 go map. Our point operations are tied or slightly faster than the built-in map. Benchmarks follow.
 
+# memory overhead is about 1.7x
+
+For 1,000,000 map[int]int entries vs Dict, heap after GC:
+
+|              | insdict   | Go map    | insdict overhead |
+| -------------|   -------:|    ------:| ----------------:|
+| Grown        | 60.67 MiB | 36.04 MiB | 68%              |
+| Presized     | 48.52 MiB | 36.08 MiB | 34%              |
+
 # benchmarks of insdict (Dict) versus the built-in Go map (Map).
 
 ~~~
