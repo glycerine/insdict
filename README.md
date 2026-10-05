@@ -19,9 +19,8 @@ CPU can prefetch. The hash index is not touched during a scan.
 Go's built-in map scans hash-table slots through a general runtime iterator.
 Each returned entry involves a runtime call, iterator state updates, occupancy
 checks, and checks for table growth and indirect key/value storage. It also
-supports adding and deleting entries during iteration, which Dict.All() does
-not promise. Go randomizes starting offsets but walks slots in order within
-each table; it does not randomly shuffle every memory access.
+supports adding entries during iteration, which Dict.All() does
+not promise is well defined (it risks having some elements repeated during iteration).
 
 On Go 1.26.4/linux/amd64, a matched integer-value summation benchmark measured
 about 112 instructions and 25 branches per map entry versus 12 instructions and
@@ -37,7 +36,7 @@ matched benchmarks. The
 [Go runtime's iteration discussion](https://github.com/golang/go/blob/go1.26.4/src/internal/runtime/maps/map.go#L134-L175)
 explains its more demanding mutation semantics.
 
-# Dict memory overhead is about 1.3x to 1.7x
+# Dict memory overhead is about 1.34x to 1.7x
 
 For 1,000,000 map[int]int entries vs Dict, heap after GC:
 
@@ -45,6 +44,8 @@ For 1,000,000 map[int]int entries vs Dict, heap after GC:
 | -------------|   -------:|    ------:| ----------------:|
 | Grown        | 60.67 MiB | 36.04 MiB | 68%              |
 | Presized     | 48.52 MiB | 36.08 MiB | 34%              |
+
+See memory_test.go to evaluate for your data shape and size.
 
 # benchmarks of insdict (Dict) versus the built-in Go map (Map).
 

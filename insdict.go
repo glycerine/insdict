@@ -349,7 +349,8 @@ func (d *Dict[K, V]) Pack(force bool) {
 // defined behavior. Put could provoke a resize of the underlying array.
 // The copy to the new larger array will omit tombstones. This will
 // change the index of seen elements. You risk seeing some of the same
-// elements more than once, if there were tombstones present.
+// elements more than once in the iteration, if there were tombstones present before
+// the current iteration point.
 func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		for i := 0; i < len(d.entries); i++ {
