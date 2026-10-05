@@ -245,8 +245,8 @@ func (d *Dict[K, V]) Del(k K) bool {
 }
 
 // All iterates entries in insertion order. Do not call Del during iteration
-// (it may compact and renumber entries); Put of new keys is safe and those
-// entries will be visited, unless a resize compacts holes mid-iteration.
+// (it may compact and renumber entries). Put of new keys during itreation
+// is also not safe since it too could also provoke a resize.
 func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		for i := 0; i < len(d.entries); i++ {
