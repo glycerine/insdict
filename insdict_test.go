@@ -434,6 +434,73 @@ func TestSizeFor(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Presizing
+// ---------------------------------------------------------------------------
+
+func TestPresizeFor(t *testing.T) {
+	for n := 0; n < 5000; n++ {
+		size := presizeFor(n)
+		if size < minSize || size&(size-1) != 0 {
+			t.Fatalf("presizeFor(%d) = %d: not a power of two >= minSize", n, size)
+		}
+		if size*2/3 < n {
+			t.Fatalf("presizeFor(%d) = %d: usable=%d < n", n, size, size*2/3)
+		}
+		if size > minSize && (size/2)*2/3 >= n {
+			t.Fatalf("presizeFor(%d) = %d: not minimal", n, size)
+		}
+	}
+}
+
+func TestNewDictSizeNeverRebuilds(t *testing.T) {
+	for _, n := range []int{1, 7, 8, 100, 1000, 12345} {
+		d := NewDictSize[int, int](n)
+		indices, entries := &d.indices[0], &d.entries[:1][0]
+		for i := 0; i < n; i++ {
+			d.Put(i, i)
+		}
+		if &d.indices[0] != indices || &d.entries[0] != entries {
+			t.Fatalf("n=%d: table was reallocated despite presizing", n)
+		}
+		if d.Len() != n {
+			t.Fatalf("n=%d: Len() = %d", n, d.Len())
+		}
+		checkInvariants(t, d)
+		// One more distinct key must still work (it grows).
+		d.Put(-1, -1)
+		if d.Get(-1) != -1 {
+			t.Fatalf("n=%d: insert past hint failed", n)
+		}
+		checkInvariants(t, d)
+	}
+}
+
+func TestNewDictSizeNonPositiveHint(t *testing.T) {
+	for _, hint := range []int{0, -5} {
+		d := NewDictSize[string, int](hint)
+		d.Put("a", 1)
+		if d.Get("a") != 1 {
+			t.Fatalf("hint=%d: Get failed", hint)
+		}
+		checkInvariants(t, d)
+	}
+}
+
+func TestNewDictFuncSizeUsesHash(t *testing.T) {
+	calls := 0
+	d := NewDictFuncSize[int, int](func(k int) uint64 { calls++; return Mix64(uint64(k)) }, 100)
+	m := newModel[int, int]()
+	for i := 0; i < 100; i++ {
+		d.Put(i, i)
+		m.put(i, i)
+	}
+	if calls == 0 {
+		t.Fatal("custom hash was not used")
+	}
+	checkAgainst(t, d, m)
+}
+
+// ---------------------------------------------------------------------------
 // Hashing
 // ---------------------------------------------------------------------------
 
@@ -993,6 +1060,23 @@ func BenchmarkMapPutPresized(b *testing.B) {
 				m := make(map[int]int, n)
 				for j := 0; j < n; j++ {
 					m[j] = j
+				}
+			}
+			reportNsPerKey(b, "put_ns/key", n)
+		})
+	}
+}
+
+// Dict presized with NewDictSize(n): the like-for-like comparison with
+// BenchmarkMapPutPresized. Construction is inside the timed loop for both.
+func BenchmarkDictPutPresized(b *testing.B) {
+	for _, n := range opSizes {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				d := NewDictSize[int, int](n)
+				for j := 0; j < n; j++ {
+					d.Put(j, j)
 				}
 			}
 			reportNsPerKey(b, "put_ns/key", n)

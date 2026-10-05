@@ -39,6 +39,32 @@ func NewDictFunc[K comparable, V any](hash func(K) uint64) *Dict[K, V] {
 	return &Dict[K, V]{hash: hash}
 }
 
+// NewDictSize returns a Dict with room for hint entries, so inserting up to
+// hint distinct keys triggers no rebuild and no reallocation.
+func NewDictSize[K comparable, V any](hint int) *Dict[K, V] {
+	return NewDictFuncSize[K, V](nil, hint)
+}
+
+// NewDictFuncSize is NewDictFunc with a capacity hint. A nil hash selects the
+// default hash.
+func NewDictFuncSize[K comparable, V any](hash func(K) uint64, hint int) *Dict[K, V] {
+	d := &Dict[K, V]{hash: hash}
+	if hint > 0 {
+		d.rebuild(presizeFor(hint))
+	}
+	return d
+}
+
+// presizeFor returns the smallest power-of-two table size whose usable entry
+// capacity (2/3 of the table) holds n entries.
+func presizeFor(n int) int {
+	size := minSize
+	for size*2/3 < n {
+		size <<= 1
+	}
+	return size
+}
+
 func (d *Dict[K, V]) hashOf(k K) uint64 {
 	if d.hash != nil {
 		return d.hash(k)
