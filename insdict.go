@@ -2,6 +2,7 @@ package insdict
 
 import (
 	"iter"
+	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
 )
@@ -46,7 +47,11 @@ func NewDictFunc[K comparable, V any](hash func(K) uint64) *Dict[K, V] {
 // NewDictSize returns a Dict with room for hint entries, so inserting up to
 // hint distinct keys triggers no rebuild and no reallocation.
 func NewDictSize[K comparable, V any](hint int) *Dict[K, V] {
-	return NewDictFuncSize[K, V](nil, hint)
+	d := &Dict[K, V]{}
+	if hint > 0 {
+		d.initSize(hint)
+	}
+	return d
 }
 
 // NewDictFuncSize is NewDictFunc with a capacity hint. A nil hash selects the
@@ -54,9 +59,15 @@ func NewDictSize[K comparable, V any](hint int) *Dict[K, V] {
 func NewDictFuncSize[K comparable, V any](hash func(K) uint64, hint int) *Dict[K, V] {
 	d := &Dict[K, V]{hash: hash}
 	if hint > 0 {
-		d.rebuild(presizeFor(hint))
+		d.initSize(hint)
 	}
 	return d
+}
+
+// Keep the constructor small enough to inline, so a local Dict can stay on
+// the stack. Entry capacity follows the requested hint rather than spare slots.
+func (d *Dict[K, V]) initSize(hint int) {
+	d.rebuildEntries(presizeFor(hint), hint)
 }
 
 // presizeFor returns the smallest power-of-two table size whose usable entry
@@ -184,30 +195,48 @@ func (d *Dict[K, V]) find(k K, h uint64, tag byte) (slot int, ix int64) {
 	return int(i), -1
 }
 
-// entries capacity is 2/3 of the index table, counting holes
+// usable is the maximum entry count (holes included) before a table rebuild.
 func (d *Dict[K, V]) usable() int { return len(d.indices) * 2 / 3 }
 
 // first empty-or-dummy slot on h's probe path (only call when the key is known absent)
 func (d *Dict[K, V]) freeSlot(h uint64) uint64 {
 	i, perturb := h&d.mask, h
-	for d.indices[i] >= 0 {
+	for d.tags[i] >= tagUsed {
 		perturb >>= 5
 		i = (i*5 + perturb + 1) & d.mask
 	}
 	return i
 }
 
-// rebuild into a fresh table of `size` slots,
-// compacting out holes, preserving order
+// Rebuild the table to size slots, compacting holes and preserving order.
+// Same-size compaction reuses existing storage when capacity permits.
 func (d *Dict[K, V]) rebuild(size int) {
+	d.rebuildEntries(size, size*2/3)
+}
+
+func (d *Dict[K, V]) rebuildEntries(size, capacity int) {
 	old := d.entries
-	d.indices = make([]int64, size)
-	d.tags = make([]byte, size)
+	reuse := size == len(d.indices)
+	if reuse {
+		clear(d.tags)
+	} else {
+		// Sizes are powers of two >= 8. Allocate the int64 indexes followed by
+		// exactly size control bytes in one pointer-free, aligned allocation.
+		// Limit the index slice's capacity so it cannot overlap the controls.
+		storage := make([]int64, size+size/8)
+		d.indices = storage[:size:size]
+		d.tags = unsafe.Slice((*byte)(unsafe.Pointer(&storage[size])), size)
+	}
 	for i := range d.indices {
 		d.indices[i] = slotEmpty
 	}
 	d.mask = uint64(size - 1)
-	d.entries = make([]entry[K, V], 0, d.usable())
+	reuseEntries := reuse && cap(old) >= capacity
+	if reuseEntries {
+		d.entries = old[:0]
+	} else {
+		d.entries = make([]entry[K, V], 0, capacity)
+	}
 	for i := range old {
 		if !old[i].live {
 			continue
@@ -216,6 +245,11 @@ func (d *Dict[K, V]) rebuild(size int) {
 		d.indices[slot] = int64(len(d.entries))
 		d.tags[slot] = hashTag(old[i].hash)
 		d.entries = append(d.entries, old[i])
+	}
+	if reuseEntries {
+		// Compaction can leave duplicate pointer-bearing entries past the new
+		// length. Clear them so later deletions can release their keys/values.
+		clear(old[len(d.entries):])
 	}
 }
 
@@ -233,23 +267,35 @@ func (d *Dict[K, V]) Put(k K, v V) {
 	if d.indices == nil {
 		d.rebuild(minSize)
 	}
-	h := d.hashOf(k)
+	var h uint64
+	if d.hash != nil {
+		h = d.hash(k)
+	} else if v, ok := any(k).(int); ok {
+		h = Mix64(uint64(v))
+	} else {
+		h = defaultHash(k)
+	}
 	tag := hashTag(h)
 
 	// existing key: overwrite in place, order position unchanged
-	if _, ix := d.find(k, h, tag); ix >= 0 {
+	slot, ix := d.find(k, h, tag)
+	if ix >= 0 {
 		d.entries[ix].val = v
 		return
 	}
 
-	// new key: make room if the entries array is full (holes included)
+	// New key: rebuild when the table's entry budget is full (holes included).
 	if len(d.entries) >= d.usable() {
 		d.rebuild(sizeFor(d.live))
+		slot = int(d.freeSlot(h))
+	} else if d.live != len(d.entries) {
+		// Deletions leave tombstones: prefer the first one on the probe path.
+		// Without holes, find already returned the insertion slot.
+		slot = int(d.freeSlot(h))
 	}
 
-	ix := int64(len(d.entries))
+	ix = int64(len(d.entries))
 	d.entries = append(d.entries, entry[K, V]{hash: h, key: k, val: v, live: true})
-	slot := d.freeSlot(h)
 	d.indices[slot] = ix
 	d.tags[slot] = tag
 	d.live++

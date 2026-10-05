@@ -488,6 +488,48 @@ func TestNewDictSizeNeverRebuilds(t *testing.T) {
 	}
 }
 
+func TestCompactionReusesStorageAndClearsTail(t *testing.T) {
+	d := NewDictSize[int, *int](100)
+	m := newModel[int, *int]()
+	for k := 0; k < d.usable(); k++ {
+		value := k
+		d.Put(k, &value)
+		m.put(k, &value)
+	}
+	for k := 0; k < len(d.entries); k += 3 {
+		d.Del(k)
+		m.del(k)
+	}
+	old := d.entries
+	indices, tags, entries := &d.indices[0], &d.tags[0], &d.entries[0]
+	d.rebuild(len(d.indices))
+	if &d.indices[0] != indices || &d.tags[0] != tags || &d.entries[0] != entries {
+		t.Fatal("same-size compaction reallocated storage")
+	}
+	for i, e := range old[len(d.entries):] {
+		if e.live || e.hash != 0 || e.key != 0 || e.val != nil {
+			t.Fatalf("uncleared compaction tail at %d: %+v", i, e)
+		}
+	}
+	checkAgainst(t, d, m)
+	if cap(d.indices) != len(d.indices) || cap(d.tags) != len(d.tags) {
+		t.Fatal("metadata slices expose excess capacity")
+	}
+}
+
+func TestPresizedEntryCapacity(t *testing.T) {
+	for _, n := range []int{1, 7, 100, 1000} {
+		d := NewDictSize[int, int](n)
+		if cap(d.entries) != n {
+			t.Fatalf("hint %d allocated capacity %d", n, cap(d.entries))
+		}
+		for i := 0; i < n+100; i++ {
+			d.Put(i, i)
+		}
+		checkInvariants(t, d)
+	}
+}
+
 func TestNewDictSizeNonPositiveHint(t *testing.T) {
 	for _, hint := range []int{0, -5} {
 		d := NewDictSize[string, int](hint)

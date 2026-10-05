@@ -1,0 +1,222 @@
+Put optimization experiments -- 2026-10-05
+=========================================
+
+Baseline: the already optimized fingerprint-first Dict at task start.
+Go 1.26.4 linux/amd64, AMD Ryzen Threadripper 3960X. Timing runs pinned to CPU 2
+with -cpu=1; five repeats for primary comparisons and three for additional
+key/value types. Medians are exploratory measurements, not statistical claims.
+MB below means decimal megabytes. CPU profiles collected separately.
+
+Kept changes
+------------
+1. Probe control bytes in freeSlot rather than int64 indexes. Reuse the empty
+   slot returned by find for a new key when there are no holes. Rebuilds and
+   tombstones still require a fresh freeSlot search. Hash int keys inline in Put,
+   preserving custom hash precedence and default hashes. Probing-only experiment:
+   million-entry grown/presized construction 96.36/63.98 -> 75.66/46.92 ms.
+
+2. Allocate exactly hint entries in presized constructors instead of every
+   spare slot allowed by the index load limit. Inserting beyond the hint still
+   works through append growth and the original rebuild threshold. Keep both
+   constructors small enough to inline, allowing local Dict headers to stay on
+   the stack. Headers escaping their caller still need a header allocation.
+   A direct NewDictSize initializer avoids its delegate exceeding the inline
+   budget after the delegate itself became inlineable.
+
+3. Coallocate indexes and control bytes in one pointer-free aligned int64
+   allocation. Powers-of-two sizes >= 8 allow exactly size control bytes in
+   size/8 extra cells. unsafe.Slice exposes only that byte tail; the index slice
+   capacity excludes it. Get's byte accesses and int64 index range are retained.
+   Strict checkptr tests validate the byte view. Dict field layout is unchanged.
+
+4. Reuse metadata and entry buffers for same-size compaction when capacity
+   permits. Copy live entries toward the front in insertion order, then clear
+   trailing entries to remove duplicate GC roots. Different-size rebuilds still
+   allocate new storage, including shrink after deletion. Tests check buffer
+   identity, cleared pointer-bearing tails, model agreement, order and metadata.
+
+Primary results (median, five repeats)
+-------------------------------------
+Million entries, grown: 96.359 -> 76.420 ms (21% faster), 57 -> 38 allocations;
+127,278,560 -> 127,283,168 B allocated. Growing bytes are essentially unchanged,
+with allocator rounding slightly increasing them. This is a speed/count win,
+not a substantial byte reduction for unhinted construction.
+Million entries, presized: 63.985 -> 45.320 ms (29% faster), 4 -> 2 allocations;
+63,619,168 -> 50,880,512 B (20% less).
+1,000 entries, grown: 29.644 -> 25.251 us, 27 -> 18 allocations.
+1,000 entries, presized: 16.087 -> 11.976 us; 67,680 -> 51,200 B; 4 -> 2 allocs.
+1,000-entry overwrite: 10.15 -> 7.659 ns. Million-entry overwrite: 55.49 -> 52.46 ns.
+
+Additional cases: at 65,536 keys, presized strings 3.320 -> 2.515 ms; custom
+hash 1.554 -> 1.291 ms; 128-byte values 4.080 -> 3.350 ms. Growing large-value
+construction was essentially flat (7.065/7.067 ms), with fewer allocations.
+
+Steady churn (initial growth warmed outside timing; one delete + Put per cycle):
+1,024 live keys: 35.10 -> 29.18 ns. 65,536 live keys: 56.79 -> 39.84 ns (30%
+faster), about 73 -> 0 B/cycle. Final runs report zero mallocs/cycle; baseline
+has fractional mallocs that the standard allocs/op metric rounds down to zero.
+Earlier unwarmed runs include amortized initial growth bytes; reuse eliminates
+recurring compaction allocations, not all future growth allocations.
+
+Read performance guardrails
+--------------------------
+Integer hits at 1,024/16,384/1,048,576: 6.608/12.07/105.3 -> 6.620/12.15/103.8 ns.
+Large integer misses: 20.33 -> 20.34 ns. Million-key string hits/misses:
+360.9/36.16 -> 360.5/36.10 ns. No meaningful Get regression in these runs.
+Isolated 1,000-key scans: 708.3 -> 709.0 ns; large scans showed no regression.
+All and Get implementations and entry layout were unchanged. Allocation
+placement can influence timing; do not attribute scan gains directly to Put.
+
+Profiles
+--------
+Baseline freeSlot accounts for 60.60% flat CPU samples, find 10.95%, zeroing
+11.44%, rebuild 55.42% cumulative. Final freeSlot is 18.27% flat; zeroing is
+20.62% flat, rebuildEntries 61.68% cumulative. Nested cumulative percentages
+must not be added to flat ones. Allocation-space profiles attribute essentially
+all grown-build bytes to rebuilds. Profile total GB increases because faster
+code completes more builds; compare B/op rather than total profile GB.
+
+Validation
+----------
+go test ./..., go vet ./..., and go test -gcflags=all=-d=checkptr=2 ./... passed.
+Default/colliding fuzz runs passed with 10,518 / 30,340 executions. One timed
+constant-hash run ended with context deadline exceeded at shutdown without
+reporting a failing input. Its cached corpus and 20,000 further executions
+passed on a single-worker, execution-count rerun; string fuzzing also passed
+20,000 executions. All mutation/property/invariant tests pass.
+
+Reproduction
+------------
+go test -c -o /tmp/insdict-put.test
+taskset -c 2 /tmp/insdict-put.test -test.run '^$' -test.bench '^BenchmarkDict(Put|PutPresized|PutOverwrite)$/^n=(10|1000|1000000)$' -test.benchtime=400ms -test.count=5 -test.cpu=1
+taskset -c 2 /tmp/insdict-put.test -test.run '^$' -test.bench '^BenchmarkPut(Strings|LargeValues|CustomHash|Churn)$' -test.benchtime=500ms -test.count=5 -test.cpu=1
+# Use individual BenchmarkPointGetInt/String leaves and BenchmarkDictScanValues
+# for read guardrails. Profile an individual construction leaf separately:
+taskset -c 2 /tmp/insdict-put.test -test.run '^$' -test.bench '^BenchmarkDictPut$/^n=1000000$' -test.benchtime=5s -test.cpu=1 -test.cpuprofile=/tmp/insdict-put.cpu -test.memprofile=/tmp/insdict-put.mem
+go tool pprof -top /tmp/insdict-put.test /tmp/insdict-put.cpu
+go tool pprof -top -alloc_space /tmp/insdict-put.test /tmp/insdict-put.mem
+
+Temporary source snapshots, profiles, compiler reports, binaries and raw runs:
+/tmp/insdict-put-profile/. baseline.test matches put.cpu/put.mem;
+coallocated.test matches final.cpu/final.mem. Summaries below preserve results.
+
+baseline-put.txt -- median [min, max] ns/op (repetitions), allocation metrics
+BenchmarkDictPut/n=10                                                  311.900 [311.100, 314.500] (5) 696 B/op	       6 allocs/op
+BenchmarkDictPut/n=1000                                              29644.000 [29547.000, 29709.000] (5) 134616 B/op	      27 allocs/op
+BenchmarkDictPut/n=1000000                                        96359479.000 [91600003.000, 97466529.000] (5) 127278560 B/op	      57 allocs/op
+BenchmarkDictPutPresized/n=10                                          238.900 [238.500, 239.900] (5) 560 B/op	       4 allocs/op
+BenchmarkDictPutPresized/n=1000                                      16087.000 [16077.000, 16130.000] (5) 67680 B/op	       4 allocs/op
+BenchmarkDictPutPresized/n=1000000                                63984664.000 [63948182.000, 68446356.000] (5) 63619168 B/op	       4 allocs/op
+BenchmarkDictPutOverwrite/n=10                                           9.039 [9.020, 9.052] (5)
+BenchmarkDictPutOverwrite/n=1000                                        10.150 [10.130, 10.180] (5)
+BenchmarkDictPutOverwrite/n=1000000                                     55.490 [55.420, 55.610] (5)
+
+probing-put.txt -- median [min, max] ns/op (repetitions), allocation metrics
+BenchmarkDictPut/n=10                                                  301.800 [300.100, 302.700] (5) 696 B/op	       6 allocs/op
+BenchmarkDictPut/n=1000                                              26687.000 [26620.000, 26775.000] (5) 134616 B/op	      27 allocs/op
+BenchmarkDictPut/n=1000000                                        75661616.000 [75307643.000, 78409141.000] (5) 127278560 B/op	      57 allocs/op
+BenchmarkDictPutPresized/n=10                                          228.100 [224.000, 231.100] (5) 560 B/op	       4 allocs/op
+BenchmarkDictPutPresized/n=1000                                      13558.000 [13510.000, 13612.000] (5) 67680 B/op	       4 allocs/op
+BenchmarkDictPutPresized/n=1000000                                46915942.000 [46865685.000, 46952822.000] (5) 63619168 B/op	       4 allocs/op
+BenchmarkDictPutOverwrite/n=10                                           6.237 [6.235, 6.253] (5)
+BenchmarkDictPutOverwrite/n=1000                                         7.651 [7.641, 7.668] (5)
+BenchmarkDictPutOverwrite/n=1000000                                     53.290 [52.610, 54.190] (5)
+
+sizing-put.txt -- median [min, max] ns/op (repetitions), allocation metrics
+BenchmarkDictPut/n=10                                                  292.500 [287.800, 301.400] (5) 696 B/op	       6 allocs/op
+BenchmarkDictPut/n=1000                                              26038.000 [25920.000, 26086.000] (5) 134616 B/op	      27 allocs/op
+BenchmarkDictPut/n=1000000                                        74650854.000 [71114805.000, 77067522.000] (5) 127278560 B/op	      57 allocs/op
+BenchmarkDictPutPresized/n=10                                          219.100 [218.500, 219.500] (5) 560 B/op	       4 allocs/op
+BenchmarkDictPutPresized/n=1000                                      12241.000 [12219.000, 12251.000] (5) 51296 B/op	       4 allocs/op
+BenchmarkDictPutPresized/n=1000000                                45891001.000 [45857976.000, 45947311.000] (5) 50880608 B/op	       4 allocs/op
+
+coallocated-put.txt -- median [min, max] ns/op (repetitions), allocation metrics
+BenchmarkDictPut/n=10                                                  259.300 [259.100, 260.000] (5) 704 B/op	       4 allocs/op
+BenchmarkDictPut/n=1000                                              25251.000 [25075.000, 25324.000] (5) 135136 B/op	      18 allocs/op
+BenchmarkDictPut/n=1000000                                        76420260.000 [73836392.000, 78303167.000] (5) 127283168 B/op	      38 allocs/op
+BenchmarkDictPutPresized/n=10                                          160.600 [160.200, 163.000] (5) 464 B/op	       2 allocs/op
+BenchmarkDictPutPresized/n=1000                                      11976.000 [11959.000, 11988.000] (5) 51200 B/op	       2 allocs/op
+BenchmarkDictPutPresized/n=1000000                                45319630.000 [45294636.000, 45773293.000] (5) 50880512 B/op	       2 allocs/op
+BenchmarkDictPutOverwrite/n=10                                           6.262 [6.260, 6.274] (5)
+BenchmarkDictPutOverwrite/n=1000                                         7.659 [7.635, 7.693] (5)
+BenchmarkDictPutOverwrite/n=1000000                                     52.460 [52.170, 52.590] (5)
+
+baseline-extra.txt -- median [min, max] ns/op (repetitions), allocation metrics
+BenchmarkPutStrings/n=1024/presized=false                            61107.000 [59188.000, 62457.000] (3) 150824 B/op	      27 allocs/op
+BenchmarkPutStrings/n=1024/presized=true                             31965.000 [31941.000, 32038.000] (3) 75872 B/op	       4 allocs/op
+BenchmarkPutStrings/n=65536/presized=false                         6873148.000 [6742889.000, 6894256.000] (3) 9379120 B/op	      45 allocs/op
+BenchmarkPutStrings/n=65536/presized=true                          3320265.000 [3315173.000, 3637645.000] (3) 4677728 B/op	       4 allocs/op
+BenchmarkPutLargeValues/n=1024/presized=false                        71326.000 [71019.000, 71356.000] (3) 466488 B/op	      27 allocs/op
+BenchmarkPutLargeValues/n=1024/presized=true                         37290.000 [37013.000, 37388.000] (3) 231520 B/op	       4 allocs/op
+BenchmarkPutLargeValues/n=65536/presized=false                     7065140.000 [6987148.000, 7110001.000] (3) 28962366 B/op	      45 allocs/op
+BenchmarkPutLargeValues/n=65536/presized=true                      4079691.000 [4060085.000, 4237261.000] (3) 14467168 B/op	       4 allocs/op
+BenchmarkPutCustomHash/n=1024/presized=false                         38383.000 [38354.000, 38447.000] (3) 150824 B/op	      27 allocs/op
+BenchmarkPutCustomHash/n=1024/presized=true                          19169.000 [19136.000, 19243.000] (3) 75872 B/op	       4 allocs/op
+BenchmarkPutCustomHash/n=65536/presized=false                      3038933.000 [2949366.000, 3131201.000] (3) 9379119 B/op	      45 allocs/op
+BenchmarkPutCustomHash/n=65536/presized=true                       1554253.000 [1524633.000, 1555551.000] (3) 4677728 B/op	       4 allocs/op
+BenchmarkPutChurn/n=1024                                                35.400 [35.380, 35.430] (3) 74 B/op	       0 allocs/op
+BenchmarkPutChurn/n=65536                                               57.360 [56.360, 57.710] (3) 74 B/op	       0 allocs/op
+
+coallocated-extra.txt -- median [min, max] ns/op (repetitions), allocation metrics
+BenchmarkPutStrings/n=1024/presized=false                            59501.000 [59290.000, 60797.000] (3) 151344 B/op	      18 allocs/op
+BenchmarkPutStrings/n=1024/presized=true                             30294.000 [30095.000, 30357.000] (3) 59392 B/op	       2 allocs/op
+BenchmarkPutStrings/n=65536/presized=false                         6441944.000 [6166888.000, 6502857.000] (3) 9383728 B/op	      30 allocs/op
+BenchmarkPutStrings/n=65536/presized=true                          2515025.000 [2505930.000, 2530198.000] (3) 3801088 B/op	       2 allocs/op
+BenchmarkPutLargeValues/n=1024/presized=false                        69269.000 [68490.000, 69403.000] (3) 467008 B/op	      18 allocs/op
+BenchmarkPutLargeValues/n=1024/presized=true                         32759.000 [32648.000, 33092.000] (3) 174080 B/op	       2 allocs/op
+BenchmarkPutLargeValues/n=65536/presized=false                     7066594.000 [7038909.000, 7085940.000] (3) 28966976 B/op	      30 allocs/op
+BenchmarkPutLargeValues/n=65536/presized=true                      3350489.000 [3275172.000, 3356656.000] (3) 11141120 B/op	       2 allocs/op
+BenchmarkPutCustomHash/n=1024/presized=false                         35928.000 [35849.000, 35991.000] (3) 151344 B/op	      18 allocs/op
+BenchmarkPutCustomHash/n=1024/presized=true                          16900.000 [16896.000, 16926.000] (3) 59392 B/op	       2 allocs/op
+BenchmarkPutCustomHash/n=65536/presized=false                      2881487.000 [2843992.000, 2882798.000] (3) 9383728 B/op	      30 allocs/op
+BenchmarkPutCustomHash/n=65536/presized=true                       1291335.000 [1278640.000, 1299402.000] (3) 3801088 B/op	       2 allocs/op
+BenchmarkPutChurn/n=1024                                                29.200 [29.190, 29.210] (3) 0 B/op	       0 allocs/op
+BenchmarkPutChurn/n=65536                                               39.920 [39.900, 39.930] (3) 2 B/op	       0 allocs/op
+
+baseline-steady-churn.txt -- median [min, max] ns/op (repetitions), allocation metrics
+BenchmarkPutChurn/n=1024                                                35.100 [35.020, 35.200] (5) 74 B/op	       0 allocs/op 0.001758 allocs/cycle
+BenchmarkPutChurn/n=65536                                               56.790 [56.510, 58.170] (5) 73 B/op	       0 allocs/op 0.0000276 allocs/cycle
+
+final-steady-churn.txt -- median [min, max] ns/op (repetitions), allocation metrics
+BenchmarkPutChurn/n=1024                                                29.180 [29.160, 29.210] (5) 0 B/op	       0 allocs/op 0 allocs/cycle
+BenchmarkPutChurn/n=65536                                               39.840 [39.820, 39.980] (5) 0 B/op	       0 allocs/op 0 allocs/cycle
+
+baseline-get.txt -- median [min, max] ns/op (repetitions), allocation metrics
+BenchmarkPointGetInt/n=1024/grown/hit/Dict                               6.608 [6.598, 6.618] (5) 0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1024/grown/miss/Dict                              6.368 [6.334, 6.402] (5) 0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/hit/Dict                             12.070 [12.030, 12.090] (5) 0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/miss/Dict                            13.210 [13.200, 13.250] (5) 0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1048576/grown/hit/Dict                          105.300 [105.300, 105.300] (5) 0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1048576/grown/miss/Dict                          20.330 [20.320, 20.350] (5) 0 B/op	       0 allocs/op
+
+final-get.txt -- median [min, max] ns/op (repetitions), allocation metrics
+BenchmarkPointGetInt/n=1024/grown/hit/Dict                               6.620 [6.618, 6.638] (5) 0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1024/grown/miss/Dict                              6.414 [6.324, 6.601] (5) 0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/hit/Dict                             12.150 [12.120, 12.150] (5) 0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/miss/Dict                            13.140 [13.120, 13.170] (5) 0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1048576/grown/hit/Dict                          103.800 [103.700, 103.800] (5) 0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1048576/grown/miss/Dict                          20.340 [20.320, 20.380] (5) 0 B/op	       0 allocs/op
+
+baseline-get-string.txt -- median [min, max] ns/op (repetitions), allocation metrics
+BenchmarkPointGetString/n=16384/grown/hit/Dict                          36.620 [36.620, 36.620] (3) 0 B/op	       0 allocs/op
+BenchmarkPointGetString/n=16384/grown/miss/Dict                         23.280 [23.280, 23.290] (3) 0 B/op	       0 allocs/op
+BenchmarkPointGetString/n=1048576/grown/hit/Dict                       360.900 [360.900, 361.000] (3) 0 B/op	       0 allocs/op
+BenchmarkPointGetString/n=1048576/grown/miss/Dict                       36.160 [36.120, 36.180] (3) 0 B/op	       0 allocs/op
+
+final-get-string.txt -- median [min, max] ns/op (repetitions), allocation metrics
+BenchmarkPointGetString/n=16384/grown/hit/Dict                          36.680 [36.650, 36.680] (3) 0 B/op	       0 allocs/op
+BenchmarkPointGetString/n=16384/grown/miss/Dict                         23.280 [23.270, 23.310] (3) 0 B/op	       0 allocs/op
+BenchmarkPointGetString/n=1048576/grown/hit/Dict                       360.500 [359.900, 361.100] (3) 0 B/op	       0 allocs/op
+BenchmarkPointGetString/n=1048576/grown/miss/Dict                       36.100 [36.090, 36.100] (3) 0 B/op	       0 allocs/op
+
+baseline-scan.txt -- median [min, max] ns/op (repetitions), allocation metrics
+BenchmarkDictScanValues/n=1000/holes=false                             708.300 [707.900, 708.900] (5)
+BenchmarkDictScanValues/n=1000/holes=true                              646.300 [646.000, 647.000] (5)
+BenchmarkDictScanValues/n=1000000/holes=false                      2100730.000 [2097479.000, 2103006.000] (5)
+BenchmarkDictScanValues/n=1000000/holes=true                       2069841.000 [2069470.000, 2073629.000] (5)
+
+final-scan.txt -- median [min, max] ns/op (repetitions), allocation metrics
+BenchmarkDictScanValues/n=1000/holes=false                             709.000 [707.400, 710.100] (5)
+BenchmarkDictScanValues/n=1000/holes=true                              646.500 [646.100, 647.000] (5)
+BenchmarkDictScanValues/n=1000000/holes=false                      1896875.000 [1878881.000, 1899243.000] (5)
+BenchmarkDictScanValues/n=1000000/holes=true                       1853959.000 [1853464.000, 1858304.000] (5)
