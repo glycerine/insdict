@@ -302,21 +302,23 @@ func (d *Dict[K, V]) Put(k K, v V) {
 }
 
 // Del removes k and reports whether it was present.
-// Del may compact the table, which invalidates in-progress iteration.
-// If you must delete during iteration, call DelWithoutCompact() instead.
+//
+// Del may re-pack the underlying table if too many tombstones are
+// present, which invalidates an All iteration since elements may
+// be missed. If you must delete
+// during an All iteration, use DelPack(k, false) -- so with allowCompact=false
+// -- to forbid the re-packing of the underlying array.
 func (d *Dict[K, V]) Del(k K) bool {
-	return d.delWithAllowMaybe(k, true)
+	return d.DelPack(k, true)
 }
 
-// DelWithoutCompact removes k and reports whether it was present.
-// DelWithoutCompact will not compact the table, and so can be called
-// during iteration. See its sibling Del to allow compaction which
-// must not happen during an All() scan.
-func (d *Dict[K, V]) DelWithoutCompact(k K) bool {
-	return d.delWithAllowMaybe(k, false)
-}
-
-func (d *Dict[K, V]) delWithAllowMaybe(k K, allowCompact bool) bool {
+// DelPack removes k and reports whether it was present.
+//
+// DelPack may compact the table if allowCompact is true, which invalidates in-progress iteration.
+// If you must delete during iteration, you must set allowCompact to false so that
+// the deletion will not compact the underlying array which could cause iteration
+// to miss elements.
+func (d *Dict[K, V]) DelPack(k K, allowCompact bool) bool {
 	if d.live == 0 {
 		return false
 	}
@@ -339,7 +341,8 @@ func (d *Dict[K, V]) delWithAllowMaybe(k K, allowCompact bool) bool {
 }
 
 // All iterates entries in insertion order. Do not call Del() during iteration
-// (it may compact and renumber entries). If you want to delete during
+// (it may compact and renumber entries, causing entries to be missed during iteration).
+// If you want to delete during
 // iteration, you must use DelWithoutCompact() which guarantees not
 // to compact the table during its operation.
 //
