@@ -309,6 +309,7 @@ func (d *Dict[K, V]) Put(k K, v V) {
 // Del will not automatically re-pack the underlying table, even
 // if many tombstones are present, and thus it is safe to delete
 // with Del during an All iteration.
+//
 // After many deletions, to vacuum tombstones, you should call Pack
 // manually.
 func (d *Dict[K, V]) Del(k K) bool {
@@ -360,7 +361,7 @@ func (d *Dict[K, V]) Pack(force bool) {
 // lower the index of seen elements. You risk missing some
 // elements during the iteration, if there were tombstones present before
 // the current iteration point. If you really must Put during iteration,
-// be sure to call Pack(true) before staring All so as to force vacuuming out of all
+// be sure to call Pack(true) before starting All so as to force vacuuming out of all
 // tombstones beforehand; and omit all Del calls during your iteration.
 func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
