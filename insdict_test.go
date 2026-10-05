@@ -363,6 +363,7 @@ func TestShrinkAfterMassDelete(t *testing.T) {
 			m.del(i)
 		}
 	}
+	d.Pack(false) // now must be done manually
 	checkAgainst(t, d, m)
 	if len(d.entries) >= n {
 		t.Fatalf("entries not compacted: len=%d", len(d.entries))

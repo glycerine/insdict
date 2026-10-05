@@ -303,22 +303,12 @@ func (d *Dict[K, V]) Put(k K, v V) {
 
 // Del removes k and reports whether it was present.
 //
-// Del may re-pack the underlying table if too many tombstones are
-// present, which invalidates an All iteration since elements may
-// be missed. If you must delete
-// during an All iteration, use DelPack(k, false) -- so with allowCompact=false
-// -- to forbid the re-packing of the underlying array.
+// Del will not automatically re-pack the underlying table, even
+// if many tombstones are present, and thus it is safe to delete
+// with Del during an All iteration.
+// After many deletions, to vacuum tombstones, you should call Pack
+// manually.
 func (d *Dict[K, V]) Del(k K) bool {
-	return d.DelPack(k, true)
-}
-
-// DelPack removes k and reports whether it was present.
-//
-// DelPack may compact the table if allowCompact is true, which invalidates in-progress iteration.
-// If you must delete during iteration, you must set allowCompact to false so that
-// the deletion will not compact the underlying array which could cause iteration
-// to miss elements.
-func (d *Dict[K, V]) DelPack(k K, allowCompact bool) bool {
 	if d.live == 0 {
 		return false
 	}
@@ -334,23 +324,32 @@ func (d *Dict[K, V]) DelPack(k K, allowCompact bool) bool {
 	d.entries[ix] = entry[K, V]{} // zero it so the GC can release K and V
 	d.live--
 
-	if allowCompact && len(d.entries) > 32 && d.live < len(d.entries)/4 {
-		d.rebuild(sizeFor(d.live))
-	}
 	return true
 }
 
-// All iterates entries in insertion order. Do not call Del() during iteration
-// (it may compact and renumber entries, causing entries to be missed during iteration).
-// If you want to delete during
-// iteration, you must use DelWithoutCompact() which guarantees not
-// to compact the table during its operation.
+// Pack may vacuum and re-pack the underlying array, removing tombstones.
+// If force is false then heuristics are used, currenly 75% tombstones,
+// to decide whether to re-pack. If force is true then we always repack.
+func (d *Dict[K, V]) Pack(force bool) {
+	if !force && len(d.entries) > 32 && d.live < len(d.entries)/4 {
+		force = true
+	}
+	if force {
+		d.rebuild(sizeFor(d.live))
+	}
+}
+
+// All iterates entries in insertion order.
+//
+// It is safe to call Del() during iteration
+// since it does not auto-repack the array, but
+// instead only writes a tombstone. The user must call Pack() manually.
 //
 // Put of new keys during All iteration is not recommended. This is not well
 // defined behavior. Put could provoke a resize of the underlying array.
 // The copy to the new larger array will omit tombstones. This will
-// change the index of seen elements (so you risk seeing some of the same
-// elements more than once, if there were tombstones present).
+// change the index of seen elements. You risk seeing some of the same
+// elements more than once, if there were tombstones present.
 func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		for i := 0; i < len(d.entries); i++ {
