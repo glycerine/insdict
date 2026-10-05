@@ -303,7 +303,20 @@ func (d *Dict[K, V]) Put(k K, v V) {
 
 // Del removes k and reports whether it was present.
 // Del may compact the table, which invalidates in-progress iteration.
+// If you must delete during iteration, call DelWithoutCompact() instead.
 func (d *Dict[K, V]) Del(k K) bool {
+	return d.delWithAllowMaybe(k, true)
+}
+
+// DelWithoutCompact removes k and reports whether it was present.
+// DelWithoutCompact will not compact the table, and so can be called
+// during iteration. See its sibling Del to allow compaction which
+// must not happen during an All() scan.
+func (d *Dict[K, V]) DelWithoutCompact(k K) bool {
+	return d.delWithAllowMaybe(k, false)
+}
+
+func (d *Dict[K, V]) delWithAllowMaybe(k K, allowCompact bool) bool {
 	if d.live == 0 {
 		return false
 	}
@@ -319,15 +332,22 @@ func (d *Dict[K, V]) Del(k K) bool {
 	d.entries[ix] = entry[K, V]{} // zero it so the GC can release K and V
 	d.live--
 
-	if len(d.entries) > 32 && d.live < len(d.entries)/4 {
+	if allowCompact && len(d.entries) > 32 && d.live < len(d.entries)/4 {
 		d.rebuild(sizeFor(d.live))
 	}
 	return true
 }
 
-// All iterates entries in insertion order. Do not call Del during iteration
-// (it may compact and renumber entries). Put of new keys during iteration
-// is also not safe since it too could also provoke a resize.
+// All iterates entries in insertion order. Do not call Del() during iteration
+// (it may compact and renumber entries). If you want to delete during
+// iteration, you must use DelWithoutCompact() which guarantees not
+// to compact the table during its operation.
+//
+// Put of new keys during All iteration is not recommended. This is not well
+// defined behavior. Put could provoke a resize of the underlying array.
+// The copy to the new larger array will omit tombstones. This will
+// change the index of seen elements (so you risk seeing some of the same
+// elements more than once, if there were tombstones present).
 func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		for i := 0; i < len(d.entries); i++ {
