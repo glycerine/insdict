@@ -263,6 +263,9 @@ func sizeFor(live int) int {
 }
 
 // Put sets k to v. Overwriting an existing key keeps its original position.
+// Put may rebuild and re-pack the underlying array. Interleaving Put with
+// range All() iteration is not recommended, as it may make iteration miss elements. See
+// the All docs for more information.
 func (d *Dict[K, V]) Put(k K, v V) {
 	if d.indices == nil {
 		d.rebuild(minSize)
@@ -328,7 +331,7 @@ func (d *Dict[K, V]) Del(k K) bool {
 }
 
 // Pack may vacuum and re-pack the underlying array, removing tombstones.
-// If force is false then heuristics are used, currenly 75% tombstones,
+// If force is false then heuristics are used, currently 75% tombstones,
 // to decide whether to re-pack. If force is true then we always repack
 // if there is a single tombstone. If there are no tombstones then
 // Pack is always a no-op.
