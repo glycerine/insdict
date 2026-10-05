@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	slotEmpty int32 = -1
-	slotDummy int32 = -2
+	slotEmpty int64 = -1
+	slotDummy int64 = -2
 	minSize         = 8 // power of two
 )
 
@@ -24,7 +24,7 @@ type entry[K comparable, V any] struct {
 // NewDictFunc. Not safe for concurrent use.
 type Dict[K comparable, V any] struct {
 	hash    func(K) uint64 // nil => defaultHash
-	indices []int32        // slotEmpty, slotDummy, or index into entries
+	indices []int64        // slotEmpty, slotDummy, or index into entries
 	entries []entry[K, V]  // dense, insertion-ordered, may contain holes
 	live    int            // live entry count
 	mask    uint64
@@ -120,7 +120,7 @@ func (d *Dict[K, V]) Len() int { return d.live }
 // Get returns the value for k, or the zero value if absent.
 func (d *Dict[K, V]) Get(k K) (v V) {
 	v, _ = d.Get2(k)
-	return v
+	return
 }
 
 // Get2 returns the value for k and whether it was present.
@@ -138,7 +138,7 @@ func (d *Dict[K, V]) Get2(k K) (v V, found bool) {
 
 // find returns the indices slot and entries index for k, or ix == -1 and the
 // empty slot where the probe ended if k is absent. Requires d.indices != nil.
-func (d *Dict[K, V]) find(k K, h uint64) (slot int, ix int32) {
+func (d *Dict[K, V]) find(k K, h uint64) (slot int, ix int64) {
 	i, perturb := h&d.mask, h
 	for {
 		ix = d.indices[i]
@@ -173,7 +173,7 @@ func (d *Dict[K, V]) freeSlot(h uint64) uint64 {
 // compacting out holes, preserving order
 func (d *Dict[K, V]) rebuild(size int) {
 	old := d.entries
-	d.indices = make([]int32, size)
+	d.indices = make([]int64, size)
 	for i := range d.indices {
 		d.indices[i] = slotEmpty
 	}
@@ -183,7 +183,7 @@ func (d *Dict[K, V]) rebuild(size int) {
 		if !old[i].live {
 			continue
 		}
-		d.indices[d.freeSlot(old[i].hash)] = int32(len(d.entries))
+		d.indices[d.freeSlot(old[i].hash)] = int64(len(d.entries))
 		d.entries = append(d.entries, old[i])
 	}
 }
@@ -215,7 +215,7 @@ func (d *Dict[K, V]) Put(k K, v V) {
 		d.rebuild(sizeFor(d.live))
 	}
 
-	ix := int32(len(d.entries))
+	ix := int64(len(d.entries))
 	d.entries = append(d.entries, entry[K, V]{hash: h, key: k, val: v, live: true})
 	d.indices[d.freeSlot(h)] = ix
 	d.live++
