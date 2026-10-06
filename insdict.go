@@ -354,7 +354,7 @@ func (d *Dict[K, V]) Put(k K, v V) {
 //
 // After many deletions, to vacuum tombstones, you should call Pack
 // manually.
-func (d *Dict[K, V]) Del(k K) bool {
+func (d *Dict[K, V]) Del(k K) (found bool) {
 	if d.live == 0 {
 		return false
 	}
@@ -371,6 +371,14 @@ func (d *Dict[K, V]) Del(k K) bool {
 	d.live--
 
 	return true
+}
+
+// DelPackFalse is a convenience wrapper that calls
+// Del(k) followed by Pack(force=false).
+func (d *Dict[K, V]) DelPackFalse(k K) (found bool) {
+	found = d.Del(k)
+	d.Pack(false)
+	return
 }
 
 // Pack may vacuum and re-pack the underlying array, removing tombstones.
