@@ -25,7 +25,20 @@ type entry[K comparable, V any] struct {
 
 // Dict is an insertion-ordered hash map modeled on CPython's compact dict.
 // The zero value is not usable for hashing custom key types; use NewDict or
-// NewDictFunc. Not safe for concurrent use.
+// NewDictFunc.
+//
+// For built-in comparable key types, the zero value Dict
+// is perfectly usable and needs no NewDict() call. The built-in
+// comparable key types are: string, int, int8, int16,
+// int32, int64, uint, uint8, uint16, uint32, uint64, bool. Other
+// key types need the user to supply the hash function, and so require
+// a call to NewDictFunc to set up. defaultHash panics to enforce this.
+//
+// Just like the built-in Go map, we are not safe for concurrent use by default,
+// and require external synchronization when a writer can race with readers.
+// Readers do not modify the data structure and so do not race with each other.
+// Any number of read-only goroutines can access a Dict concurrently (those
+// that do no Put, no Del, and no Pack; only Get, Get2, Len, or All).
 type Dict[K comparable, V any] struct {
 	hash    func(K) uint64 // nil => defaultHash
 	indices []int64        // slotEmpty, slotDummy, or index into entries
@@ -335,7 +348,14 @@ func (d *Dict[K, V]) Del(k K) bool {
 // If force is false then heuristics are used, currently 75% tombstones,
 // to decide whether to re-pack. If force is true then we always repack
 // if there is a single tombstone. If there are no tombstones then
-// Pack is always a no-op.
+// Pack is always a very fast no-op. This enables preparing for:
+//
+// # Put during iteration (critical warning)
+//
+// You must call Pack(true) to eliminate all tombstones before doing a
+// range All() if you want to to interleave Put with iteration -- otherwise
+// your iteation may miss keys after a Put grows the table and
+// shrinks the indexes of keys that had tombstones before them.
 func (d *Dict[K, V]) Pack(force bool) {
 	if d.live == len(d.entries) {
 		// no tombstones, do nothing.
@@ -362,7 +382,7 @@ func (d *Dict[K, V]) Pack(force bool) {
 // elements during the iteration, if there were tombstones present before
 // the current iteration point. If you really must Put during iteration,
 // be sure to call Pack(true) before starting All so as to force vacuuming out of all
-// tombstones beforehand; and forbid Del calls during your iteration.
+// tombstones beforehand.
 func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		for i := 0; i < len(d.entries); i++ {
