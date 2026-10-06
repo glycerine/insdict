@@ -355,6 +355,7 @@ func (d *Dict[K, V]) Set(k K, v V) (newlyAdded bool) {
 	return d.Put(k, v)
 }
 
+// DeleteAll quickly deletes all elements from the dictionary.
 func (d *Dict[K, V]) DeleteAll() {
 	d.indices = nil
 	d.entries = nil
@@ -468,6 +469,9 @@ func (d *Dict[K, V]) Pack(force bool) {
 // iteration without changing any of the original index positions.
 func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
+		if d == nil {
+			return
+		}
 		for i := 0; i < len(d.entries); i++ {
 			e := &d.entries[i]
 			if !e.live {
