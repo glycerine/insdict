@@ -444,3 +444,18 @@ func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 		}
 	}
 }
+
+// Clone creates and returns an independent and identical copy of d.
+// Of course if V contains pointers then r will contain
+// an identical copy of those pointers.
+func (d *Dict[K, V]) Clone() (r *Dict[K, V]) {
+	r = &Dict[K, V]{
+		hash:    d.hash,
+		indices: append([]int64(nil), d.indices...),
+		entries: append([]entry[K, V](nil), d.entries...),
+		live:    d.live,
+		mask:    d.mask,
+		tags:    append([]byte(nil), d.tags...),
+	}
+	return
+}
