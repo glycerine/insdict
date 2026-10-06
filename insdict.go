@@ -347,6 +347,11 @@ func (d *Dict[K, V]) Put(k K, v V) {
 	d.live++
 }
 
+// Set is the same as Put. Included for backward compatability.
+func (d *Dict[K, V]) Set(k K, v V) {
+	d.Put(k, v)
+}
+
 // Del removes k and reports whether it was present.
 //
 // Del will not automatically re-pack the underlying table, even
