@@ -441,6 +441,15 @@ func (d *Dict[K, V]) Pack(force bool) {
 // become too large, causing some Dict entries to be missed. Since
 // this is not expected to be a common use pattern, we do not contort the code to
 // accommodate it. You have been warned.
+//
+// A simple alternative approach that will not skip over any of the original
+// keys while supporting both Put and Del during iteration is to
+// Clone the Dict and iterate one copy while modifying the other.
+//
+// Note that if you only need to Put (and not Del), then Pack(true)
+// once before All suffices to avoid skipped keys and the need to Clone.
+// Lacking tombstones, the underlying array can be grown during
+// iteration without changing any of the original index positions.
 func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		for i := 0; i < len(d.entries); i++ {
