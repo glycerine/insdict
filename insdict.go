@@ -23,16 +23,17 @@ type entry[K comparable, V any] struct {
 	live bool
 }
 
-// Dict is an insertion-ordered hash map modeled on CPython's compact dict.
-// The zero value is not usable for hashing custom key types; use NewDict or
-// NewDictFunc.
+// Dict is an insertion-ordered hash map modeled on CPython's 3.7+ compact dict.
 //
 // For built-in comparable key types, the zero value Dict
 // is perfectly usable and needs no NewDict() call. The built-in
 // comparable key types are: string, int, int8, int16,
 // int32, int64, uint, uint8, uint16, uint32, uint64, bool. Other
 // key types need the user to supply the hash function, and so require
-// a call to NewDictFunc to set up. defaultHash panics to enforce this.
+// a call to NewDictFunc to set up. The internal defaultHash() panics to enforce this.
+//
+// Pre-allocating with NewDictSize or NewDictFuncSize can save
+// time and memory by avoiding table rebuilds on growth; benchmark your use.
 //
 // Just like the built-in Go map, we are not safe for concurrent use by default,
 // and require external synchronization when a writer can race with readers.
