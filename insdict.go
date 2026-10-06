@@ -143,7 +143,8 @@ func defaultHash[K comparable](k K) uint64 {
 	panic("insdict: no default hash for key type; use NewDictFunc")
 }
 
-// EasyHashString providees an xxhash function for strings.
+// EasyHashString provides a default hash for strings. Currently this
+// is based on cespare/xxhash, but this is subject to change.
 func EasyHashString(key string) uint64 { return xxhash.Sum64String(key) }
 
 // EasyHash* functions are a set of convenience hash functions
