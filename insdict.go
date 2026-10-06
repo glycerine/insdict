@@ -351,11 +351,11 @@ func (d *Dict[K, V]) Del(k K) bool {
 // if there is a single tombstone. If there are no tombstones then
 // Pack is always a very fast no-op. This enables preparing for:
 //
-// # Put during iteration (critical warning)
+// # Put during iteration (an uncommon pattern with a correctness gotcha)
 //
 // You must call Pack(true) to eliminate all tombstones before doing a
-// range All() if you want to to interleave Put with iteration -- otherwise
-// your iteation may miss keys after a Put grows the table and
+// range All() in the special case of interleaving Put calls with iteration -- otherwise
+// your iteration may miss keys after a Put grows the table and
 // shrinks the indexes of keys that had tombstones before them.
 func (d *Dict[K, V]) Pack(force bool) {
 	if d.live == len(d.entries) {
@@ -379,11 +379,19 @@ func (d *Dict[K, V]) Pack(force bool) {
 // Put of new keys during All iteration is not recommended.
 // Put could provoke a resize of the underlying array.
 // The copy to the new larger array will omit tombstones. This will
-// lower the index of seen elements. You risk missing some
+// lower the index of elements that were after the tombstones. You risk missing some
 // elements during the iteration, if there were tombstones present before
-// the current iteration point. If you really must Put during iteration,
+// the current iteration point.
+//
+// If you really must Put during iteration,
 // be sure to call Pack(true) before starting All so as to force vacuuming out of all
-// tombstones beforehand.
+// tombstones beforehand; and forbid Del during such iterations (that also Put).
+// As noted, a Del followed by a Put can result in an internal copy
+// and compaction that will lower the index of all keys that had
+// tombstones before them in the array. The iterator's held index integer can
+// become too large, causing some Dict entries to be missed. Since
+// this is not expected to be a common use pattern, we do not contort the code to
+// accommodate it. You have been warned.
 func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		for i := 0; i < len(d.entries); i++ {
