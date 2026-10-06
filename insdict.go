@@ -143,6 +143,34 @@ func defaultHash[K comparable](k K) uint64 {
 	panic("insdict: no default hash for key type; use NewDictFunc")
 }
 
+// EasyHashString providees an xxhash function for strings.
+func EasyHashString(key string) uint64 { return xxhash.Sum64String(key) }
+
+// EasyHash* functions are a set of convenience hash functions
+// to make it easy for users to call NewDictFunc
+// for a given key type. It is probably faster to set the d.hash function once
+// rather than to dispatching to defaultHash on every Get and doing
+// reflection. After all, the type of the key is known and fixed.
+// .
+func EasyHashBool(key bool) uint64 {
+	if key {
+		return Mix64(1)
+	}
+	return Mix64(0)
+}
+
+func EasyHashInt(key int) uint64     { return Mix64(uint64(key)) }
+func EasyHashInt8(key int8) uint64   { return Mix64(uint64(key)) }
+func EasyHashInt16(key int16) uint64 { return Mix64(uint64(key)) }
+func EasyHashInt32(key int32) uint64 { return Mix64(uint64(key)) }
+func EasyHashInt64(key int64) uint64 { return Mix64(uint64(key)) }
+
+func EasyHashUint(key uint) uint64     { return Mix64(uint64(key)) }
+func EasyHashUint8(key uint8) uint64   { return Mix64(uint64(key)) }
+func EasyHashUint16(key uint16) uint64 { return Mix64(uint64(key)) }
+func EasyHashUint32(key uint32) uint64 { return Mix64(uint64(key)) }
+func EasyHashUint64(key uint64) uint64 { return Mix64(key) }
+
 // Len returns the number of live entries.
 func (d *Dict[K, V]) Len() int { return d.live }
 
