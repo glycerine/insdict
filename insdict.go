@@ -377,14 +377,15 @@ func (d *Dict[K, V]) Del(k K) bool {
 // If force is false then heuristics are used, currently 75% tombstones,
 // to decide whether to re-pack. If force is true then we always repack
 // if there is a single tombstone. If there are no tombstones then
-// Pack is always a very fast no-op. This enables preparing for:
-//
-// # Put during iteration (an uncommon pattern with a correctness gotcha)
+// Pack is always a very fast no-op. This enables preparing for
+// Put during iteration (an uncommon pattern):
 //
 // You must call Pack(true) to eliminate all tombstones before doing a
 // range All() in the special case of interleaving Put calls with iteration -- otherwise
 // your iteration may miss keys after a Put grows the table and
 // shrinks the indexes of keys that had tombstones before them.
+// Do not do both Put and Del during All iteration unless you can
+// tolerate skipping over some keys unknowingly. See the All docs for more.
 func (d *Dict[K, V]) Pack(force bool) {
 	if d.live == len(d.entries) {
 		// no tombstones, do nothing.
