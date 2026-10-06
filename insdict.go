@@ -465,8 +465,13 @@ func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 }
 
 // Clone creates and returns an independent and identical copy of d.
-// Of course if V contains pointers then r will contain
-// an identical copy of those pointers.
+// Keys and values are copied shallowly.
+//
+// So, of course, if K or V contains a pointer then the clone r will contain
+// an identical copy of that pointer. This is what it means to say
+// that keys and values are shallow copies: referenced (pointed to) data is shared.
+//
+// The custom hash function (if any) and any state captured by it are also shared.
 func (d *Dict[K, V]) Clone() (r *Dict[K, V]) {
 	r = &Dict[K, V]{
 		hash:    d.hash,
