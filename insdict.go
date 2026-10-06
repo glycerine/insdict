@@ -353,7 +353,12 @@ func (d *Dict[K, V]) Put(k K, v V) {
 // with Del during an All iteration.
 //
 // After many deletions, to vacuum tombstones, you should call Pack
-// manually.
+// manually, or use juse regularly use DelPackFalse instead of Del.
+//
+// DelPackFalse is a convenient alternative to Del
+// that will automatically compact based on heuristics -- if you
+// don't want to think about this very hard about when to Pack but still want
+// your table to get Packed at some point.
 func (d *Dict[K, V]) Del(k K) (found bool) {
 	if d.live == 0 {
 		return false
@@ -375,6 +380,10 @@ func (d *Dict[K, V]) Del(k K) (found bool) {
 
 // DelPackFalse is a convenience wrapper that calls
 // Del(k) followed by Pack(force=false).
+// As a replacement for Del, it can save the user from having
+// to think too hard about when to Pack away their tombstones.
+// However it cannot be intermixed with All iteration safely
+// as it calls Pack; see the comments on All.
 func (d *Dict[K, V]) DelPackFalse(k K) (found bool) {
 	found = d.Del(k)
 	d.Pack(false)
