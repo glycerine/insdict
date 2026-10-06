@@ -4,7 +4,9 @@ insdict: deterministic insert-ordered iteration hash table for Golang
 Dict provides a hash table for Go that iterates in insert-order for deterministic 
 (reproducible) range over All(). Just like the Python 3.7+ dict dictionary.
 
-We now use int64 indexes so that Dict size is not limited to 2^31.
+This branch uses int32 indexes to reduce memory usage. It supports up to
+2^31-1 entries on 64-bit platforms; oversized capacity hints and insertions
+beyond the supported limit panic. The limit is lower on 32-bit platforms.
 
 In terms of performance, the common full table scans over All() are 5-20x faster than the built-in
 go map. Our point operations are tied or slightly faster than the built-in map. Benchmarks follow.
@@ -37,14 +39,18 @@ matched benchmarks. The
 [Go runtime's iteration discussion](https://github.com/golang/go/blob/go1.26.4/src/internal/runtime/maps/map.go#L134-L175)
 explains its more demanding mutation semantics.
 
-# Dict memory overhead is about 1.34x to 1.7x
+# Dict memory overhead on this int32 branch is about 1.12x to 1.46x
 
 For 1,000,000 map[int]int entries vs Dict, heap after GC:
 
 |              | insdict   | Go map    | insdict overhead |
 | -------------|   -------:|    ------:| ----------------:|
-| Grown        | 60.67 MiB | 36.04 MiB | 68%              |
-| Presized     | 48.52 MiB | 36.08 MiB | 34%              |
+| Grown        | 52.67 MiB | 35.96 MiB | 46%              |
+| Presized     | 40.52 MiB | 36.08 MiB | 12%              |
+
+Measured on Go 1.26.4, linux/amd64. Run
+`go test -run '^TestMemoryMillionKeys$' -v -count=1` to reproduce.
+Compared with int64 indexes, int32 indexes save 8 MiB in each million-key case.
 
 See memory_test.go to evaluate for your data shape and size.
 

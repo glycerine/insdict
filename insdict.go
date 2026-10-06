@@ -8,12 +8,17 @@ import (
 )
 
 const (
-	slotEmpty int64 = -1
-	slotDummy int64 = -2
+	slotEmpty int32 = -1
+	slotDummy int32 = -2
 	minSize         = 8 // power of two
 	tagEmpty  byte  = 0
 	tagDummy  byte  = 1
 	tagUsed   byte  = 0x80
+
+	// Entry offsets must fit in int32. On 32-bit machines, table sizing is
+	// further limited by the largest supported power-of-two slice length.
+	maxTableSize = 1 << min(32, 8*unsafe.Sizeof(int(0))-2)
+	maxEntries   = min(1<<31-1, maxTableSize-(maxTableSize+2)/3)
 )
 
 type entry[K comparable, V any] struct {
@@ -31,6 +36,7 @@ type entry[K comparable, V any] struct {
 // int32, int64, uint, uint8, uint16, uint32, uint64, bool. Other
 // key types need the user to supply the hash function, and so require
 // a call to NewDictFunc to set up. The internal defaultHash() panics to enforce this.
+// Entry indexes are int32; exceeding the supported entry count panics.
 //
 // Pre-allocating with NewDictSize or NewDictFuncSize can save
 // time and memory by avoiding table rebuilds on growth; benchmark your use.
@@ -42,7 +48,7 @@ type entry[K comparable, V any] struct {
 // that do no Put, no Del, and no Pack; only Get, Get2, Len, or All).
 type Dict[K comparable, V any] struct {
 	hash    func(K) uint64 // nil => defaultHash
-	indices []int64        // slotEmpty, slotDummy, or index into entries
+	indices []int32        // slotEmpty, slotDummy, or index into entries
 	entries []entry[K, V]  // dense, insertion-ordered, may contain holes
 	live    int            // live entry count
 	mask    uint64
@@ -87,8 +93,11 @@ func (d *Dict[K, V]) initSize(hint int) {
 // presizeFor returns the smallest power-of-two table size whose usable entry
 // capacity (2/3 of the table) holds n entries.
 func presizeFor(n int) int {
+	if n > maxEntries {
+		panic("insdict: entry count exceeds int32 table limit")
+	}
 	size := minSize
-	for size*2/3 < n {
+	for usableFor(size) < n {
 		size <<= 1
 	}
 	return size
@@ -222,7 +231,7 @@ func hashTag(h uint64) byte { return tagUsed | byte(h>>57) }
 // find returns the indices slot and entries index for k, or ix == -1 and the
 // empty slot where the probe ended if k is absent. Requires d.indices != nil
 // and tag == hashTag(h). Passing the tag keeps this probe loop inlineable.
-func (d *Dict[K, V]) find(k K, h uint64, tag byte) (slot int, ix int64) {
+func (d *Dict[K, V]) find(k K, h uint64, tag byte) (slot int, ix int32) {
 	i, perturb := h&d.mask, h
 	for d.tags[i] != tagEmpty {
 		if d.tags[i] == tag {
@@ -239,7 +248,12 @@ func (d *Dict[K, V]) find(k K, h uint64, tag byte) (slot int, ix int64) {
 }
 
 // usable is the maximum entry count (holes included) before a table rebuild.
-func (d *Dict[K, V]) usable() int { return len(d.indices) * 2 / 3 }
+func (d *Dict[K, V]) usable() int { return usableFor(len(d.indices)) }
+
+func usableFor(size int) int {
+	// floor(2*size/3), without overflowing int on 32-bit platforms.
+	return min(size-(size+2)/3, maxEntries)
+}
 
 // first empty-or-dummy slot on h's probe path (only call when the key is known absent)
 func (d *Dict[K, V]) freeSlot(h uint64) uint64 {
@@ -254,19 +268,22 @@ func (d *Dict[K, V]) freeSlot(h uint64) uint64 {
 // Rebuild the table to size slots, compacting holes and preserving order.
 // Same-size compaction reuses existing storage when capacity permits.
 func (d *Dict[K, V]) rebuild(size int) {
-	d.rebuildEntries(size, size*2/3)
+	d.rebuildEntries(size, usableFor(size))
 }
 
 func (d *Dict[K, V]) rebuildEntries(size, capacity int) {
+	if size > maxTableSize || capacity > maxEntries {
+		panic("insdict: entry count exceeds int32 table limit")
+	}
 	old := d.entries
 	reuse := size == len(d.indices)
 	if reuse {
 		clear(d.tags)
 	} else {
-		// Sizes are powers of two >= 8. Allocate the int64 indexes followed by
+		// Sizes are powers of two >= 8. Allocate the int32 indexes followed by
 		// exactly size control bytes in one pointer-free, aligned allocation.
 		// Limit the index slice's capacity so it cannot overlap the controls.
-		storage := make([]int64, size+size/8)
+		storage := make([]int32, size+size/4)
 		d.indices = storage[:size:size]
 		d.tags = unsafe.Slice((*byte)(unsafe.Pointer(&storage[size])), size)
 	}
@@ -285,7 +302,7 @@ func (d *Dict[K, V]) rebuildEntries(size, capacity int) {
 			continue
 		}
 		slot := d.freeSlot(old[i].hash)
-		d.indices[slot] = int64(len(d.entries))
+		d.indices[slot] = int32(len(d.entries))
 		d.tags[slot] = hashTag(old[i].hash)
 		d.entries = append(d.entries, old[i])
 	}
@@ -299,7 +316,9 @@ func (d *Dict[K, V]) rebuildEntries(size, capacity int) {
 // size such that live entries fill at most ~1/3 of usable capacity after rebuild
 func sizeFor(live int) int {
 	size := minSize
-	for size < live*3 {
+	// Saturate at the largest table rather than overflowing the size or
+	// trying to preserve the usual spare capacity beyond the entry limit.
+	for size < maxTableSize && size/3 < live {
 		size <<= 1
 	}
 	return size
@@ -332,6 +351,9 @@ func (d *Dict[K, V]) Put(k K, v V) {
 
 	// New key: rebuild when the table's entry budget is full (holes included).
 	if len(d.entries) >= d.usable() {
+		if d.live == maxEntries {
+			panic("insdict: entry count exceeds int32 table limit")
+		}
 		d.rebuild(sizeFor(d.live))
 		slot = int(d.freeSlot(h))
 	} else if d.live != len(d.entries) {
@@ -340,7 +362,7 @@ func (d *Dict[K, V]) Put(k K, v V) {
 		slot = int(d.freeSlot(h))
 	}
 
-	ix = int64(len(d.entries))
+	ix = int32(len(d.entries))
 	d.entries = append(d.entries, entry[K, V]{hash: h, key: k, val: v, live: true})
 	d.indices[slot] = ix
 	d.tags[slot] = tag
@@ -475,7 +497,7 @@ func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 func (d *Dict[K, V]) Clone() (r *Dict[K, V]) {
 	r = &Dict[K, V]{
 		hash:    d.hash,
-		indices: append([]int64(nil), d.indices...),
+		indices: append([]int32(nil), d.indices...),
 		entries: append([]entry[K, V](nil), d.entries...),
 		live:    d.live,
 		mask:    d.mask,

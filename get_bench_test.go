@@ -41,7 +41,7 @@ func benchmarkPointGet[K comparable](b *testing.B, key func(int) K) {
 					if layout == "sparse" {
 						d.rebuild(len(d.indices) * 2)
 					}
-					// Benchmark-only sidecar fingerprints preserve full int64 indexes.
+					// Benchmark-only sidecar fingerprints preserve the index width.
 					tags := make([]byte, len(d.indices))
 					for slot, ix := range d.indices {
 						if ix >= 0 {
@@ -117,7 +117,7 @@ func benchmarkPointGet[K comparable](b *testing.B, key func(int) K) {
 									if impl != "Map" && impl != "Map2" {
 										b.ReportMetric(probes, "probes/op")
 										b.ReportMetric(float64(d.live)/float64(len(d.indices)), "load")
-										bytes := float64(cap(d.indices)*8+cap(d.tags)) + float64(cap(d.entries))*float64(unsafe.Sizeof(entry[K, int]{}))
+										bytes := float64(cap(d.indices))*float64(unsafe.Sizeof(d.indices[0])) + float64(cap(d.tags)) + float64(cap(d.entries))*float64(unsafe.Sizeof(entry[K, int]{}))
 										if impl == "Tagged" {
 											bytes += float64(len(tags))
 										}
