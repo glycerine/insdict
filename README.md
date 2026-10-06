@@ -20,7 +20,8 @@ Go's built-in map scans hash-table slots through a general runtime iterator.
 Each returned entry involves a runtime call, iterator state updates, occupancy
 checks, and checks for table growth and indirect key/value storage. It also
 supports adding entries during iteration, which Dict.All() needs special
-care to do correctly (see the All docs; call Pack(true) first).
+care to do correctly (see [the All docs](https://pkg.go.dev/github.com/glycerine/insdict#Dict.All); 
+call Pack(true) first).
 
 On Go 1.26.4/linux/amd64, a matched integer-value summation benchmark measured
 about 112 instructions and 25 branches per map entry versus 12 instructions and
