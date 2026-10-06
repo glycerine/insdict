@@ -149,7 +149,7 @@ func EasyHashString(key string) uint64 { return xxhash.Sum64String(key) }
 // EasyHash* functions are a set of convenience hash functions
 // to make it easy for users to call NewDictFunc
 // for a given key type. It is probably faster to set the d.hash function once
-// rather than to dispatching to defaultHash on every Get and doing
+// rather than to dispatch to defaultHash on every Get and doing
 // reflection. After all, the type of the key is known and fixed.
 // .
 func EasyHashBool(key bool) uint64 {
