@@ -403,14 +403,16 @@ func (d *Dict[K, V]) Pack(force bool) {
 //
 // It is safe to call Del() during iteration
 // since it does not auto-repack the array, but
-// instead only writes a tombstone. The user must call Pack() manually.
+// instead only writes a tombstone. (Compaction only happens
+// when the user calls Pack() manually or when Put
+// grows the array and we compact during the copy over).
 //
 // Put of new keys during All iteration is not recommended.
 // Put could provoke a resize of the underlying array.
 // The copy to the new larger array will omit tombstones. This will
 // lower the index of elements that were after the tombstones. You risk missing some
-// elements during the iteration, if there were tombstones present before
-// the current iteration point.
+// elements during the iteration (without knowing it), if there were
+// tombstones present before the current iteration point.
 //
 // If you really must Put during iteration,
 // be sure to call Pack(true) before starting All so as to force vacuuming out of all
