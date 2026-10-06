@@ -371,9 +371,9 @@ func (d *Dict[K, V]) DeleteAll() {
 // with Del during an All iteration.
 //
 // After many deletions, to vacuum tombstones, you should call Pack
-// manually; or you could just regularly use DelPackFalse instead of Del.
+// manually; or you could just regularly use DelPackMaybe instead of Del.
 //
-// DelPackFalse is an alternative to Del, a user convenience method
+// DelPackMaybe is an alternative to Del, a user convenience method
 // that will automatically compact based on heuristics. It is provided for
 // those times when you don't want to think very hard about when to Pack,
 // but still want your tombstones cleaned up at some point.
@@ -396,13 +396,13 @@ func (d *Dict[K, V]) Del(k K) (found bool) {
 	return true
 }
 
-// DelPackFalse is a convenience wrapper that calls
+// DelPackMaybe is a convenience wrapper that calls
 // Del(k) followed by Pack(force=false).
 // As a replacement for Del, it can save the user from having
 // to think too hard about when to Pack away their tombstones.
 // However it cannot be intermixed with All iteration safely
 // as it calls Pack; see the comments on All.
-func (d *Dict[K, V]) DelPackFalse(k K) (found bool) {
+func (d *Dict[K, V]) DelPackMaybe(k K) (found bool) {
 	found = d.Del(k)
 	d.Pack(false)
 	return
