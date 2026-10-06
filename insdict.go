@@ -411,9 +411,9 @@ func (d *Dict[K, V]) DelPackFalse(k K) (found bool) {
 // Pack may vacuum and re-pack the underlying array, removing tombstones.
 // If force is false then heuristics are used, currently 75% tombstones,
 // to decide whether to re-pack. If force is true then we always repack
-// if there is a single tombstone. If there are no tombstones then
-// Pack is always a very fast no-op. This enables preparing for
-// Put during iteration (an uncommon pattern):
+// if there are any tombstones at all. If there are no tombstones then
+// Pack is always a very fast no-op, no matter what force is. This enables preparing for
+// Put during iteration (an uncommon pattern) with Pack(true):
 //
 // You must call Pack(true) to eliminate all tombstones before doing a
 // range All() in the special case of interleaving Put calls with iteration -- otherwise
@@ -459,12 +459,13 @@ func (d *Dict[K, V]) Pack(force bool) {
 // this is not expected to be a common use pattern, we do not contort the code to
 // accommodate it. You have been warned.
 //
-// A simple alternative approach that will not skip over any of the original
-// keys while supporting both Put and Del during iteration is to
-// Clone the Dict and iterate one copy while modifying the other.
+// A simple alternative approach that will not mysteriously
+// skip over any of the original keys while supporting both
+// Put and Del during iteration is to Clone the Dict and
+// iterate one copy while modifying the other.
 //
 // Note that if you only need to Put (and not Del), then Pack(true)
-// once before All suffices to avoid skipped keys and the need to Clone.
+// once before All suffices to avoid accidentally skipped keys and the need to Clone.
 // Lacking tombstones, the underlying array can be grown during
 // iteration without changing any of the original index positions.
 func (d *Dict[K, V]) All() iter.Seq2[K, V] {
