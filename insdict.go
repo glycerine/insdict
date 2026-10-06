@@ -1,6 +1,7 @@
 package insdict
 
 import (
+	"fmt"
 	"iter"
 	"unsafe"
 
@@ -140,7 +141,7 @@ func defaultHash[K comparable](k K) uint64 {
 		}
 		return Mix64(0)
 	}
-	panic("insdict: no default hash for key type; use NewDictFunc")
+	panic(fmt.Sprintf("insdict: no default hash for key type '%T'; use NewDictFunc", k))
 }
 
 // EasyHashString provides a default hash for strings. Currently this
@@ -309,7 +310,7 @@ func sizeFor(live int) int {
 // Put may rebuild and re-pack the underlying array. Interleaving Put with
 // range All() iteration is not recommended, as it may make iteration miss elements. See
 // the All docs for more information.
-func (d *Dict[K, V]) Put(k K, v V) {
+func (d *Dict[K, V]) Put(k K, v V) (newlyAdded bool) {
 	if d.indices == nil {
 		d.rebuild(minSize)
 	}
@@ -327,7 +328,7 @@ func (d *Dict[K, V]) Put(k K, v V) {
 	slot, ix := d.find(k, h, tag)
 	if ix >= 0 {
 		d.entries[ix].val = v
-		return
+		return false
 	}
 
 	// New key: rebuild when the table's entry budget is full (holes included).
@@ -345,11 +346,21 @@ func (d *Dict[K, V]) Put(k K, v V) {
 	d.indices[slot] = ix
 	d.tags[slot] = tag
 	d.live++
+
+	return true
 }
 
 // Set is the same as Put. Included for backward compatability.
-func (d *Dict[K, V]) Set(k K, v V) {
-	d.Put(k, v)
+func (d *Dict[K, V]) Set(k K, v V) (newlyAdded bool) {
+	return d.Put(k, v)
+}
+
+func (d *Dict[K, V]) DeleteAll() {
+	d.indices = nil
+	d.entries = nil
+	d.live = 0
+	d.mask = 0
+	d.tags = nil
 }
 
 // Del removes k and reports whether it was present.
