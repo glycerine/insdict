@@ -371,12 +371,12 @@ func (d *Dict[K, V]) DeleteAll() {
 // with Del during an All iteration.
 //
 // After many deletions, to vacuum tombstones, you should call Pack
-// manually, or use juse regularly use DelPackFalse instead of Del.
+// manually; or you could just regularly use DelPackFalse instead of Del.
 //
-// DelPackFalse is a convenient alternative to Del
-// that will automatically compact based on heuristics -- if you
-// don't want to think about this very hard about when to Pack but still want
-// your table to get Packed at some point.
+// DelPackFalse is an alternative to Del, a user convenience method
+// that will automatically compact based on heuristics. It is provided for
+// those times when you don't want to think very hard about when to Pack,
+// but still want your tombstones cleaned up at some point.
 func (d *Dict[K, V]) Del(k K) (found bool) {
 	if d.live == 0 {
 		return false
