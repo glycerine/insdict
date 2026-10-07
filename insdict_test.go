@@ -1291,6 +1291,27 @@ func BenchmarkDictIterate(b *testing.B) {
 	}
 }
 
+func BenchmarkDictIterateSlowWriteAll(b *testing.B) {
+	for _, n := range iterSizes {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			d := NewDict[int, int]()
+			for j := 0; j < n; j++ {
+				d.Put(j, j)
+			}
+			b.ResetTimer()
+			var sink int
+			for i := 0; i < b.N; i++ {
+				for _, v := range d.SlowWriteAll() {
+					sink += v
+				}
+			}
+			b.StopTimer()
+			reportIterNsPerKey(b, n)
+			benchmarkSink = sink
+		})
+	}
+}
+
 // Dict with holes: every 4th key of an n*4/3 fill is deleted (about a quarter
 // of the entries array), leaving ~n live keys. This stays well under the
 // compaction threshold, so it measures iteration over a holey entries array.

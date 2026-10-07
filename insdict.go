@@ -40,7 +40,7 @@ type entry[K comparable, V any] struct {
 // and require external synchronization when a writer can race with readers.
 // Readers do not modify the data structure and so do not race with each other.
 // Any number of read-only goroutines can access a Dict concurrently (those
-// that do no Put/Set, no Del, no Pack, and no WriteAll; only Get, Get2, Len, or All).
+// that do no Put/Set, no Del, no Pack, and no SlowWriteAll; only Get, Get2, Len, or All).
 type Dict[K comparable, V any] struct {
 	hash    func(K) uint64 // nil => defaultHash
 	indices []int64        // slotEmpty, slotDummy, or index into entries
@@ -49,7 +49,7 @@ type Dict[K comparable, V any] struct {
 	mask    uint64
 	tags    []byte // empty, dummy, or tagUsed | high 7 hash bits
 
-	// for WriteAll: since this must be a single writer situation anyway,
+	// for SlowWriteAll: since this must be a single writer situation anyway,
 	// we know we can forbid packing on put.
 	neverPack bool
 }
@@ -471,12 +471,12 @@ func (d *Dict[K, V]) Pack(force bool) {
 // tombstones before them in the array. The iterator's held index integer can
 // become too large, causing some Dict entries to be missed. Since
 // this is not expected to be a common use pattern, we do not contort the code to
-// accommodate it. You have been warned. Update: or use WriteAll instead of All.
+// accommodate it. You have been warned. Update: or use SlowWriteAll instead of All.
 //
 // A simple alternative approach that will not mysteriously
 // skip over any of the original keys while supporting both
 // Put and Del during iteration is to Clone the Dict and
-// iterate one copy while modifying the other. Update: or use WriteAll.
+// iterate one copy while modifying the other. Update: or use SlowWriteAll.
 //
 // Note that if you only need to Put (and not Del), then Pack(true)
 // once before All suffices to avoid accidentally skipped keys and the need to Clone.
@@ -499,23 +499,23 @@ func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 	}
 }
 
-// WriteAll initiates a range iteration over all keys.
+// SlowWriteAll initiates a range iteration over all keys.
 // This iteration can tolerate interleaved Put and Del without
 // the risk of accidentally skipping keys (in contrast to All).
 //
 // PRE-REQUISITE: the calling goroutine must ensure (through sync.Mutex.Lock,
 // sync.RWMutex.Lock, or the equivalent logical guarantee) that they maintain exclusive
-// access to the dictionary for the entire WriteAll operation. Since this
+// access to the dictionary for the entire SlowWriteAll operation. Since this
 // is already a requirement for any Put or Del, this should not be
 // any additional burden except to ensure that the exclusive access begins
-// strictly before the first iteration of a range over WriteAll.
+// strictly before the first iteration of a range over SlowWriteAll.
 //
 // The skipping keys hazard occurs on Pack or when a Put causes the underlying array
 // to grow (see comments on All); normally the copy over to a bigger array
 // omits tombstones (keys that have been deleted with Del), automatically
 // Pack-ing the array.
 //
-// WriteAll takes advantage of the knowledge of exclusive Dict
+// SlowWriteAll takes advantage of the knowledge of exclusive Dict
 // access to temporarily mark the Dict so that array growth
 // (provoked by Put) will copy tombstones (created by Del) to the
 // new array rather than vacuum them out. Thus
@@ -524,17 +524,19 @@ func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 // because it only ever extends the valid index number, never
 // shrinking it.
 //
-// WriteAll does not automatically do a Pack at its beginning or end to
+// SlowWriteAll does not automatically do a Pack at its beginning or end to
 // allow the user fine grain control over when Pack happens. The user
-// might wish to do a Pack prior to, or after, a WriteAll in order to optimize
-// memory use. Be warned however that *during* a range over WriteAll
+// might wish to do a Pack prior to, or after, a SlowWriteAll in order to optimize
+// memory use. Be warned however that *during* a range over SlowWriteAll
 // iteration, Pack is ineffective. It will run but will eliminate
 // no tombstones and thus reclaim no space, but in return we preserve
 // the accuracy of the iterator's position until the iteration completes.
 //
 // Newly Put keys are guaranteed to be visible and will appear naturally
 // at the tail of the range after all prior keys; in insertion order.
-func (d *Dict[K, V]) WriteAll() iter.Seq2[K, V] {
+//
+// SlowWriteAll is about 5x slower than All in our benchmarks.
+func (d *Dict[K, V]) SlowWriteAll() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		if d == nil || len(d.entries) == 0 {
 			return
