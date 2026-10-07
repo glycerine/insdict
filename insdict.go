@@ -517,7 +517,8 @@ func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 // due to being less inlinable. See go test -v -run=xxx -bench=Iterate
 //
 // PRE-REQUISITE: the calling goroutine must ensure (through sync.Mutex.Lock,
-// sync.RWMutex.Lock, or the equivalent logical guarantee) that they maintain exclusive
+// sync.RWMutex.Lock, or the equivalent logical guarantee such as only ever
+// allowing a single goroutine to even see the Dict) that they maintain exclusive
 // access to the dictionary for the entire SlowWriteAll operation. Since this
 // is already a requirement for any Put or Del, this should not be
 // any additional burden except to ensure that the exclusive access begins
