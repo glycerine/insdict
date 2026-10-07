@@ -11,7 +11,7 @@ import (
 const (
 	slotEmpty int64 = -1
 	slotDummy int64 = -2
-	minSize         = 8 // power of two
+	minSize         = 8 // must be a power of two and evenly divisible by 8.
 	tagEmpty  byte  = 0
 	tagDummy  byte  = 1
 	tagUsed   byte  = 0x80
@@ -48,6 +48,10 @@ type Dict[K comparable, V any] struct {
 	live    int            // live entry count
 	mask    uint64
 	tags    []byte // empty, dummy, or tagUsed | high 7 hash bits
+
+	// for SlowAll: since this must be a single writer situation anyway,
+	// we know we can forbid packing on put.
+	neverPack bool
 }
 
 func NewDict[K comparable, V any]() *Dict[K, V] {
@@ -145,7 +149,8 @@ func defaultHash[K comparable](k K) uint64 {
 }
 
 // EasyHashString provides a default hash for strings. Currently this
-// is based on cespare/xxhash, but this is subject to change.
+// is based on cespare/xxhash, but this is subject to change if I find
+// something even better.
 func EasyHashString(key string) uint64 { return xxhash.Sum64String(key) }
 
 // EasyHash* functions are a set of convenience hash functions
@@ -282,7 +287,7 @@ func (d *Dict[K, V]) rebuildEntries(size, capacity int) {
 		d.entries = make([]entry[K, V], 0, capacity)
 	}
 	for i := range old {
-		if !old[i].live {
+		if !old[i].live && !d.neverPack {
 			continue
 		}
 		slot := d.freeSlot(old[i].hash)
@@ -306,7 +311,8 @@ func sizeFor(live int) int {
 	return size
 }
 
-// Put sets k to v. Overwriting an existing key keeps its original position.
+// Put associates key k with value v. Updating the value associated with
+// an existing key keeps the key's original insertion order.
 // Put may rebuild and re-pack the underlying array. Interleaving Put with
 // range All() iteration is not recommended, as it may make iteration miss elements. See
 // the All docs for more information.
@@ -362,6 +368,12 @@ func (d *Dict[K, V]) DeleteAll() {
 	d.live = 0
 	d.mask = 0
 	d.tags = nil
+}
+
+// Clear is the same as DeleteAll. It quickly deletes all elements
+// from the dictionary.
+func (d *Dict[K, V]) Clear() {
+	d.DeleteAll()
 }
 
 // Del removes k and reports whether it was present.
@@ -473,6 +485,45 @@ func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 		if d == nil {
 			return
 		}
+		for i := 0; i < len(d.entries); i++ {
+			e := &d.entries[i]
+			if !e.live {
+				continue
+			}
+			if !yield(e.key, e.val) {
+				return
+			}
+		}
+	}
+}
+
+// SlowAll initiates an iteration that can tolerate Put and Del
+// while looping without any risk of accidentally skipping keys.
+// The hazard occurs when a Put causes the underlying array
+// to grow (see comments on All); normally the copy over omits
+// tombstones (keys that have been deleted with Del).
+//
+// PRE: the calling goroutine must ensure (through sync.Mutex or equivalent logic) that
+// they maintain exclusive read and write access to the dictionary
+// until SlowAll is done.
+//
+// Since inter-mixing Puts inside a range over SlowAll is in total
+// a writing operation, the user must therefore ensure continuous
+// exclusive access by the calling goroutine during the entire range iteration.
+//
+// We take advantage of this knowledge to mark the Dict so that arrary growth (provoked
+// by Put) will copy tombstones to the new array rather than vacuum them), and thus
+// we can accurately maintain our iteration index in the face of arbitrary
+// interleaved Put and Del and iteration advances.
+func (d *Dict[K, V]) SlowAll() iter.Seq2[K, V] {
+	return func(yield func(K, V) bool) {
+		if d == nil || len(d.entries) == 0 {
+			return
+		}
+		d.neverPack = true
+		defer func() {
+			d.neverPack = false
+		}()
 		for i := 0; i < len(d.entries); i++ {
 			e := &d.entries[i]
 			if !e.live {
