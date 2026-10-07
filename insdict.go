@@ -40,7 +40,7 @@ type entry[K comparable, V any] struct {
 // and require external synchronization when a writer can race with readers.
 // Readers do not modify the data structure and so do not race with each other.
 // Any number of read-only goroutines can access a Dict concurrently (those
-// that do no Put, no Del, and no Pack; only Get, Get2, Len, or All).
+// that do no Put/Set, no Del, no Pack, and no WriteAll; only Get, Get2, Len, or All).
 type Dict[K comparable, V any] struct {
 	hash    func(K) uint64 // nil => defaultHash
 	indices []int64        // slotEmpty, slotDummy, or index into entries
@@ -49,7 +49,7 @@ type Dict[K comparable, V any] struct {
 	mask    uint64
 	tags    []byte // empty, dummy, or tagUsed | high 7 hash bits
 
-	// for SlowAll: since this must be a single writer situation anyway,
+	// for WriteAll: since this must be a single writer situation anyway,
 	// we know we can forbid packing on put.
 	neverPack bool
 }
@@ -449,11 +449,12 @@ func (d *Dict[K, V]) Pack(force bool) {
 // All iterates entries in insertion order; the order in which the
 // keys were first added to the Dict.
 //
-// It is safe to call Del() during iteration
+// Assuming you have exclusive write access to the Dict,
+// it is safe to call Del() during iteration
 // since it does not auto-repack the array, but
 // instead only writes a tombstone. (Compaction only happens
-// when the user calls Pack() manually or when Put
-// grows the array and we compact during the copy over).
+// when the user calls Pack manually or when Put
+// grows the array and we Pack during the copy over).
 //
 // Put of new keys during All iteration is not recommended.
 // Put could provoke a resize of the underlying array.
@@ -470,7 +471,7 @@ func (d *Dict[K, V]) Pack(force bool) {
 // tombstones before them in the array. The iterator's held index integer can
 // become too large, causing some Dict entries to be missed. Since
 // this is not expected to be a common use pattern, we do not contort the code to
-// accommodate it. You have been warned. Update: see and use WriteAll instead of All.
+// accommodate it. You have been warned. Update: or use WriteAll instead of All.
 //
 // A simple alternative approach that will not mysteriously
 // skip over any of the original keys while supporting both
