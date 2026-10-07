@@ -49,8 +49,7 @@ type Dict[K comparable, V any] struct {
 	mask    uint64
 	tags    []byte // empty, dummy, or tagUsed | high 7 hash bits
 
-	// for SlowWriteAll: since this must be a single writer situation anyway,
-	// we know we can forbid packing on put.
+	// Active SlowWriteAll iterations preserve entry positions across rebuilds.
 	neverPack bool
 }
 
@@ -287,7 +286,11 @@ func (d *Dict[K, V]) rebuildEntries(size, capacity int) {
 		d.entries = make([]entry[K, V], 0, capacity)
 	}
 	for i := range old {
-		if !old[i].live && !d.neverPack {
+		if !old[i].live {
+			if d.neverPack {
+				// Preserve the position without indexing a deleted entry.
+				d.entries = append(d.entries, old[i])
+			}
 			continue
 		}
 		slot := d.freeSlot(old[i].hash)
@@ -339,7 +342,12 @@ func (d *Dict[K, V]) Put(k K, v V) (newlyAdded bool) {
 
 	// New key: rebuild when the table's entry budget is full (holes included).
 	if len(d.entries) >= d.usable() {
-		d.rebuild(sizeFor(d.live))
+		count := d.live
+		if d.neverPack {
+			// Retained tombstones consume the entry budget too.
+			count = len(d.entries)
+		}
+		d.rebuild(sizeFor(count))
 		slot = int(d.freeSlot(h))
 	} else if d.live != len(d.entries) {
 		// Deletions leave tombstones: prefer the first one on the probe path.
@@ -434,6 +442,9 @@ func (d *Dict[K, V]) DelPackMaybe(k K) (found bool) {
 // Do not do both Put and Del during All iteration unless you can
 // tolerate skipping over some keys unknowingly. See the All docs for more.
 func (d *Dict[K, V]) Pack(force bool) {
+	if d.neverPack {
+		return
+	}
 	if d.live == len(d.entries) {
 		// no tombstones, do nothing.
 		return
@@ -502,7 +513,8 @@ func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 // SlowWriteAll initiates a range iteration over all keys.
 // This iteration can tolerate interleaved Put and Del without
 // the risk of accidentally skipping keys (in contrast to All).
-// SlowWriteAll can be a little slower than All (about 1.2x) in our benchmarks.
+// SlowWriteAll is about 4x slower than All in our benchmarks; this is likely
+// due to being less inlinable. See go test -v -run=xxx -bench=Iterate
 //
 // PRE-REQUISITE: the calling goroutine must ensure (through sync.Mutex.Lock,
 // sync.RWMutex.Lock, or the equivalent logical guarantee) that they maintain exclusive
@@ -529,9 +541,11 @@ func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 // allow the user fine grain control over when Pack happens. The user
 // might wish to do a Pack prior to, or after, a SlowWriteAll in order to optimize
 // memory use. Be warned however that *during* a range over SlowWriteAll
-// iteration, Pack is ineffective. It will run but will eliminate
-// no tombstones and thus reclaim no space, but in return we preserve
+// iteration, Pack is a no-op and reclaims no space, preserving
 // the accuracy of the iterator's position until the iteration completes.
+//
+// Nested SlowWriteAll iterations are supported. Clear and DeleteAll must not
+// be called during iteration because they discard the entry positions.
 //
 // Newly Put keys are guaranteed to be visible and will appear naturally
 // at the tail of the range after all prior keys; in insertion order.
@@ -540,21 +554,22 @@ func (d *Dict[K, V]) SlowWriteAll() iter.Seq2[K, V] {
 		if d == nil || len(d.entries) == 0 {
 			return
 		}
-		// note: defer makes reverting neverPack 4x slower rather than 1.17x slower.
-		// Hence we do the neverPack = false manually in two places below,
-		// rather than with a defer, for performance. See bench=Iterate
+		// Restore the enclosing iterator's state, even on panic or Goexit.
+		// By not assuming previous was false, we support nested SlowWriteAll iteration.
+		previous := d.neverPack
 		d.neverPack = true
+		defer func() {
+			d.neverPack = previous
+		}()
 		for i := 0; i < len(d.entries); i++ {
 			e := &d.entries[i]
 			if !e.live {
 				continue
 			}
 			if !yield(e.key, e.val) {
-				d.neverPack = false
 				return
 			}
 		}
-		d.neverPack = false
 	}
 }
 
