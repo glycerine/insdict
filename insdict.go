@@ -446,7 +446,8 @@ func (d *Dict[K, V]) Pack(force bool) {
 	}
 }
 
-// All iterates entries in insertion order.
+// All iterates entries in insertion order; the order in which the
+// keys were first added to the Dict.
 //
 // It is safe to call Del() during iteration
 // since it does not auto-repack the array, but
@@ -469,12 +470,12 @@ func (d *Dict[K, V]) Pack(force bool) {
 // tombstones before them in the array. The iterator's held index integer can
 // become too large, causing some Dict entries to be missed. Since
 // this is not expected to be a common use pattern, we do not contort the code to
-// accommodate it. You have been warned.
+// accommodate it. You have been warned. Update: see and use WriteAll instead of All.
 //
 // A simple alternative approach that will not mysteriously
 // skip over any of the original keys while supporting both
 // Put and Del during iteration is to Clone the Dict and
-// iterate one copy while modifying the other.
+// iterate one copy while modifying the other. Update: or use WriteAll.
 //
 // Note that if you only need to Put (and not Del), then Pack(true)
 // once before All suffices to avoid accidentally skipped keys and the need to Clone.
@@ -497,25 +498,42 @@ func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 	}
 }
 
-// SlowAll initiates an iteration that can tolerate Put and Del
-// while looping without any risk of accidentally skipping keys.
-// The hazard occurs when a Put causes the underlying array
-// to grow (see comments on All); normally the copy over omits
-// tombstones (keys that have been deleted with Del).
+// WriteAll initiates a range iteration over all keys.
+// This iteration can tolerate interleaved Put and Del without
+// the risk of accidentally skipping keys (in contrast to All).
 //
-// PRE: the calling goroutine must ensure (through sync.Mutex or equivalent logic) that
-// they maintain exclusive read and write access to the dictionary
-// until SlowAll is done.
+// PRE-REQUISITE: the calling goroutine must ensure (through sync.Mutex.Lock,
+// sync.RWMutex.Lock, or the equivalent logical guarantee) that they maintain exclusive
+// access to the dictionary for the entire WriteAll operation. Since this
+// is already a requirement for any Put or Del, this should not be
+// any additional burden except to ensure that the exclusive access begins
+// strictly before the first iteration of a range over WriteAll.
 //
-// Since inter-mixing Puts inside a range over SlowAll is in total
-// a writing operation, the user must therefore ensure continuous
-// exclusive access by the calling goroutine during the entire range iteration.
+// The skipping keys hazard occurs on Pack or when a Put causes the underlying array
+// to grow (see comments on All); normally the copy over to a bigger array
+// omits tombstones (keys that have been deleted with Del), automatically
+// Pack-ing the array.
 //
-// We take advantage of this knowledge to mark the Dict so that arrary growth (provoked
-// by Put) will copy tombstones to the new array rather than vacuum them), and thus
-// we can accurately maintain our iteration index in the face of arbitrary
-// interleaved Put and Del and iteration advances.
-func (d *Dict[K, V]) SlowAll() iter.Seq2[K, V] {
+// WriteAll takes advantage of the knowledge of exclusive Dict
+// access to temporarily mark the Dict so that array growth
+// (provoked by Put) will copy tombstones (created by Del) to the
+// new array rather than vacuum them out. Thus
+// we can accurately maintain our iteration index in the face of arbitrarily
+// interleaved Put, Del, and iteration advances. Put now creates no hazard
+// because it only ever extends the valid index number, never
+// shrinking it.
+//
+// WriteAll does not automatically do a Pack at its beginning or end to
+// allow the user fine grain control over when Pack happens. The user
+// might wish to do a Pack prior to, or after, a WriteAll in order to optimize
+// memory use. Be warned however that *during* a range over WriteAll
+// iteration, Pack is ineffective. It will run but will eliminate
+// no tombstones and thus reclaim no space, but in return we preserve
+// the accuracy of the iterator's position until the iteration completes.
+//
+// Newly Put keys are guaranteed to be visible and will appear naturally
+// at the tail of the range after all prior keys; in insertion order.
+func (d *Dict[K, V]) WriteAll() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		if d == nil || len(d.entries) == 0 {
 			return
