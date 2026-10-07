@@ -502,7 +502,7 @@ func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 // SlowWriteAll initiates a range iteration over all keys.
 // This iteration can tolerate interleaved Put and Del without
 // the risk of accidentally skipping keys (in contrast to All).
-// SlowWriteAll is about 4x slower than All in our benchmarks.
+// SlowWriteAll is about 20% slower than All in our inlined benchmarks.
 //
 // PRE-REQUISITE: the calling goroutine must ensure (through sync.Mutex.Lock,
 // sync.RWMutex.Lock, or the equivalent logical guarantee) that they maintain exclusive
@@ -540,19 +540,21 @@ func (d *Dict[K, V]) SlowWriteAll() iter.Seq2[K, V] {
 		if d == nil || len(d.entries) == 0 {
 			return
 		}
+		// note: defer makes reverting neverPack 4x slower rather than 1.17x slower.
+		// so we do the neverPack = false manually in two places below,
+		// rather than with a defer, for performance. See bench=Iterate
 		d.neverPack = true
-		defer func() {
-			d.neverPack = false
-		}()
 		for i := 0; i < len(d.entries); i++ {
 			e := &d.entries[i]
 			if !e.live {
 				continue
 			}
 			if !yield(e.key, e.val) {
+				d.neverPack = false
 				return
 			}
 		}
+		d.neverPack = false
 	}
 }
 
