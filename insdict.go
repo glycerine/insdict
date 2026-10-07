@@ -589,6 +589,8 @@ func (d *Dict[K, V]) Clone() (r *Dict[K, V]) {
 		live:    d.live,
 		mask:    d.mask,
 		tags:    append([]byte(nil), d.tags...),
+
+		// deliberately omit neverPack. It should always start false.
 	}
 	return
 }
