@@ -13,7 +13,8 @@ import (
 // Helpers: reference model and structural invariant checker
 // ---------------------------------------------------------------------------
 
-// model is the trivially-correct reference: a Go map plus an explicit order.
+// model is a reference for reflexive keys (k == k): a Go map plus an explicit order.
+// NaN keys need a different oracle because map lookup cannot retrieve their values.
 type model[K comparable, V any] struct {
 	m     map[K]V
 	order []K
@@ -87,8 +88,13 @@ func checkInvariants[K comparable, V any](t testing.TB, d *Dict[K, V]) {
 		if h := d.hashOf(e.key); h != e.hash {
 			t.Fatalf("entry %d stored hash %x != recomputed %x", i, e.hash, h)
 		}
-		if _, ix := d.find(e.key, e.hash, hashTag(e.hash)); int(ix) != i {
-			t.Fatalf("find(%v) returned ix=%d, want %d", e.key, ix, i)
+		// NaN-containing keys are non-reflexive and intentionally unfindable.
+		if e.key == e.key {
+			if _, ix := d.find(e.key, e.hash, hashTag(e.hash)); int(ix) != i {
+				t.Fatalf("find(%v) returned ix=%d, want %d", e.key, ix, i)
+			}
+		} else if _, ix := d.find(e.key, e.hash, hashTag(e.hash)); ix != -1 {
+			t.Fatalf("find(non-reflexive key %v) returned ix=%d, want -1", e.key, ix)
 		}
 	}
 	if liveCount != d.live {
@@ -96,6 +102,7 @@ func checkInvariants[K comparable, V any](t testing.TB, d *Dict[K, V]) {
 	}
 
 	refs, empties := 0, 0
+	references := make([]int, len(d.entries))
 	for slot, ix := range d.indices {
 		switch {
 		case ix == slotEmpty:
@@ -112,11 +119,40 @@ func checkInvariants[K comparable, V any](t testing.TB, d *Dict[K, V]) {
 			if int(ix) >= len(d.entries) || !d.entries[ix].live {
 				t.Fatalf("slot %d points at bad/dead entry %d", slot, ix)
 			}
+			references[ix]++
+			// Check reachability by slot, independent of key equality. This
+			// also validates NaNs, which cannot be located through find.
+			h := d.entries[ix].hash
+			probe, perturb := h&d.mask, h
+			reachable := false
+			for step := 0; step < size+13; step++ {
+				if int(probe) == slot {
+					reachable = true
+					break
+				}
+				if d.tags[probe] == tagEmpty {
+					break
+				}
+				perturb >>= 5
+				probe = (probe*5 + perturb + 1) & d.mask
+			}
+			if !reachable {
+				t.Fatalf("slot %d is unreachable on entry %d's probe path", slot, ix)
+			}
 			if want := hashTag(d.entries[ix].hash); d.tags[slot] != want {
 				t.Fatalf("slot %d has tag %x, want %x", slot, d.tags[slot], want)
 			}
 		default:
 			t.Fatalf("slot %d has invalid value %d", slot, ix)
+		}
+	}
+	for i, e := range d.entries {
+		want := 0
+		if e.live {
+			want = 1
+		}
+		if references[i] != want {
+			t.Fatalf("entry %d has %d index references, want %d", i, references[i], want)
 		}
 	}
 	if refs != d.live {
@@ -1029,6 +1065,7 @@ func testFloat32NaN(t *testing.T, d *Dict[float32, int]) {
 	if d.Len() != 51 {
 		t.Fatalf("Len = %d, want 51", d.Len())
 	}
+	checkInvariants(t, d)
 }
 
 func testFloat64NaN(t *testing.T, d *Dict[float64, int]) {
@@ -1089,6 +1126,7 @@ func testFloat64NaN(t *testing.T, d *Dict[float64, int]) {
 	if d.Len() != 51 {
 		t.Fatalf("Len = %d, want 51", d.Len())
 	}
+	checkInvariants(t, d)
 }
 
 func testComplex64NaN(t *testing.T, d *Dict[complex64, int]) {
@@ -1128,6 +1166,7 @@ func testComplex64NaN(t *testing.T, d *Dict[complex64, int]) {
 	if got, ok := d.Get2(regular); !ok || got != 42 {
 		t.Fatalf("Get2(regular) = (%d, %v), want (42, true)", got, ok)
 	}
+	checkInvariants(t, d)
 }
 
 func testComplex128NaN(t *testing.T, d *Dict[complex128, int]) {
@@ -1167,6 +1206,7 @@ func testComplex128NaN(t *testing.T, d *Dict[complex128, int]) {
 	if got, ok := d.Get2(regular); !ok || got != 42 {
 		t.Fatalf("Get2(regular) = (%d, %v), want (42, true)", got, ok)
 	}
+	checkInvariants(t, d)
 }
 
 // Two dicts fed the same operation sequence must end up bit-for-bit identical.
