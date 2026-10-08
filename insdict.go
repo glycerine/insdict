@@ -545,11 +545,23 @@ func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 // iteration, Pack is a no-op and reclaims no space, preserving
 // the accuracy of the iterator's position until the iteration completes.
 //
-// Nested SlowWriteAll iterations are supported. Clear and DeleteAll must not
-// be called during iteration because they discard the entry positions.
+// Nested SlowWriteAll iterations are supported.
 //
-// Newly Put keys are guaranteed to be visible and will appear naturally
-// at the tail of the range after all prior keys; in insertion order.
+// Clear and DeleteAll set the loop to terminate after the current
+// round finishes, since len(entries) drops to 0.
+//
+// It is not recommended to Put after a Clear inside a loop; you should
+// just break after a Clear or DeleteAll. If a single pass through the loop body
+// does a Clear and then some Puts, those Put keys will probably be
+// skipped by the currrent SlowWriteAll (but even that is not guaranteed,
+// since the subsequent behavior depends on both the number of Puts and the current
+// iteration point). In short, after a Clear, you should first break out of
+// the loop before doing Puts to get well-defined and repeatable behavior
+// with respect to key visibility.
+//
+// Assuming no Clear is used, newly Put keys are guaranteed to be visible
+// and will appear naturally at the tail of the range after all prior keys;
+// in insertion order.
 //
 // This means, for example, that if a loop Puts a new key during every
 // iteration, then it will never terminate on its own (it will run out of memory first);
