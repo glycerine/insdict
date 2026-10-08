@@ -425,6 +425,9 @@ func (d *Dict[K, V]) Set(k K, v V) (newlyAdded bool) {
 
 // DeleteAll quickly deletes all elements from the dictionary.
 func (d *Dict[K, V]) DeleteAll() {
+	if d == nil {
+		return
+	}
 	d.indices = nil
 	d.entries = nil
 	d.live = 0
