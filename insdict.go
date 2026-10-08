@@ -435,8 +435,8 @@ func (d *Dict[K, V]) rebuildEntries(size, capacity int) {
 		// Allocate int indexes followed by exactly size control bytes in one
 		// pointer-free, aligned allocation.
 		// Limit the index slice's capacity so it cannot overlap the controls.
-		const indexBytes = int(unsafe.Sizeof(int(0)))
-		storage := make([]int, size+size/indexBytes)
+		const bytesPerInt = int(unsafe.Sizeof(int(0)))
+		storage := make([]int, size+size/bytesPerInt) // works because size is the number of ints.
 		d.indices = storage[:size:size]
 		d.tags = unsafe.Slice((*byte)(unsafe.Pointer(&storage[size])), size)
 	}
