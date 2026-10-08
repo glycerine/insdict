@@ -88,8 +88,11 @@ func checkInvariants[K comparable, V any](t testing.TB, d *Dict[K, V]) {
 		if h := d.hashOf(e.key); h != e.hash {
 			t.Fatalf("entry %d stored hash %x != recomputed %x", i, e.hash, h)
 		}
-		// NaN-containing keys are non-reflexive and intentionally unfindable.
-		if e.key == e.key {
+		// Floating-point and complex NaNs are findable under Dict equality.
+		kind := reflect.TypeOf(e.key)
+		numericNaN := kind != nil && (kind.Kind() == reflect.Float32 || kind.Kind() == reflect.Float64 ||
+			kind.Kind() == reflect.Complex64 || kind.Kind() == reflect.Complex128)
+		if e.key == e.key || numericNaN {
 			if _, ix := d.find(e.key, e.hash, hashTag(e.hash)); int(ix) != i {
 				t.Fatalf("find(%v) returned ix=%d, want %d", e.key, ix, i)
 			}
@@ -121,7 +124,7 @@ func checkInvariants[K comparable, V any](t testing.TB, d *Dict[K, V]) {
 			}
 			references[ix]++
 			// Check reachability by slot, independent of key equality. This
-			// also validates NaNs, which cannot be located through find.
+			// also verifies index references independently of NaN equality.
 			h := d.entries[ix].hash
 			probe, perturb := h&d.mask, h
 			reachable := false
@@ -1009,202 +1012,83 @@ func TestNaNKeys(t *testing.T) {
 
 func testFloat32NaN(t *testing.T, d *Dict[float32, int]) {
 	t.Helper()
-	nan := float32(math.NaN())
-
-	// Each NaN insertion adds a new entry since nan == nan is false in Go (matching built-in map behavior).
-	for i := 1; i <= 50; i++ {
-		d.Put(nan, i)
-		if d.Len() != i {
-			t.Fatalf("after %d NaN puts, Len = %d, want %d", i, d.Len(), i)
-		}
-	}
-
-	// Lookup for NaN key should never match any key.
-	if _, ok := d.Get2(nan); ok {
-		t.Fatal("Get2(NaN) returned ok=true, want false")
-	}
-	if got := d.Get(nan); got != 0 {
-		t.Fatalf("Get(NaN) = %d, want 0", got)
-	}
-
-	// Del with NaN key should not delete anything because NaN != NaN.
-	if d.Del(nan) {
-		t.Fatal("Del(NaN) returned true, want false")
-	}
-	if d.Len() != 50 {
-		t.Fatalf("Len after Del(NaN) = %d, want 50", d.Len())
-	}
-
-	// Range All yields all NaN entries in insertion order.
-	idx := 1
-	for k, v := range d.All() {
-		if !math.IsNaN(float64(k)) {
-			t.Fatalf("entry key %v is not NaN", k)
-		}
-		if v != idx {
-			t.Fatalf("entry value = %d, want %d", v, idx)
-		}
-		idx++
-	}
-	if idx != 51 {
-		t.Fatalf("iterated %d entries, want 50", idx-1)
-	}
-
-	// Non-NaN keys work normally alongside NaNs.
-	d.Put(1.0, 100)
-	d.Put(2.0, 200)
-	if got, ok := d.Get2(1.0); !ok || got != 100 {
-		t.Fatalf("Get2(1.0) = (%d, %v), want (100, true)", got, ok)
-	}
-	if got, ok := d.Get2(2.0); !ok || got != 200 {
-		t.Fatalf("Get2(2.0) = (%d, %v), want (200, true)", got, ok)
-	}
-	if !d.Del(1.0) {
-		t.Fatal("Del(1.0) failed")
-	}
-	if d.Len() != 51 {
-		t.Fatalf("Len = %d, want 51", d.Len())
-	}
-	checkInvariants(t, d)
+	checkSingleNaNKey(t, d, []float32{float32(math.NaN()),
+		math.Float32frombits(0x7fc00002), math.Float32frombits(0xffc00001),
+		math.Float32frombits(0x7f800001)}, float32(1))
 }
 
 func testFloat64NaN(t *testing.T, d *Dict[float64, int]) {
 	t.Helper()
-	nan := math.NaN()
-
-	// Each NaN insertion adds a new entry since nan == nan is false in Go.
-	for i := 1; i <= 50; i++ {
-		d.Put(nan, i)
-		if d.Len() != i {
-			t.Fatalf("after %d NaN puts, Len = %d, want %d", i, d.Len(), i)
-		}
-	}
-
-	// Lookup for NaN key should never match any key.
-	if _, ok := d.Get2(nan); ok {
-		t.Fatal("Get2(NaN) returned ok=true, want false")
-	}
-	if got := d.Get(nan); got != 0 {
-		t.Fatalf("Get(NaN) = %d, want 0", got)
-	}
-
-	// Del with NaN key should not delete anything because NaN != NaN.
-	if d.Del(nan) {
-		t.Fatal("Del(NaN) returned true, want false")
-	}
-	if d.Len() != 50 {
-		t.Fatalf("Len after Del(NaN) = %d, want 50", d.Len())
-	}
-
-	// Range All yields all NaN entries in insertion order.
-	idx := 1
-	for k, v := range d.All() {
-		if !math.IsNaN(k) {
-			t.Fatalf("entry key %v is not NaN", k)
-		}
-		if v != idx {
-			t.Fatalf("entry value = %d, want %d", v, idx)
-		}
-		idx++
-	}
-	if idx != 51 {
-		t.Fatalf("iterated %d entries, want 50", idx-1)
-	}
-
-	// Non-NaN keys work normally alongside NaNs.
-	d.Put(1.0, 100)
-	d.Put(2.0, 200)
-	if got, ok := d.Get2(1.0); !ok || got != 100 {
-		t.Fatalf("Get2(1.0) = (%d, %v), want (100, true)", got, ok)
-	}
-	if got, ok := d.Get2(2.0); !ok || got != 200 {
-		t.Fatalf("Get2(2.0) = (%d, %v), want (200, true)", got, ok)
-	}
-	if !d.Del(1.0) {
-		t.Fatal("Del(1.0) failed")
-	}
-	if d.Len() != 51 {
-		t.Fatalf("Len = %d, want 51", d.Len())
-	}
-	checkInvariants(t, d)
+	checkSingleNaNKey(t, d, []float64{math.NaN(),
+		math.Float64frombits(0x7ff8000000000002), math.Float64frombits(0xfff8000000000001),
+		math.Float64frombits(0x7ff0000000000001)}, float64(1))
 }
 
 func testComplex64NaN(t *testing.T, d *Dict[complex64, int]) {
 	t.Helper()
 	nan := float32(math.NaN())
-	c1 := complex(nan, 0)
-	c2 := complex(0, nan)
-	c3 := complex(nan, nan)
-
-	d.Put(c1, 1)
-	d.Put(c2, 2)
-	d.Put(c3, 3)
-	if d.Len() != 3 {
-		t.Fatalf("Len = %d, want 3", d.Len())
-	}
-
-	// None of the NaN complex numbers can be looked up with Get2 because == evaluates to false.
-	if _, ok := d.Get2(c1); ok {
-		t.Fatal("Get2(c1) returned ok=true, want false")
-	}
-	if _, ok := d.Get2(c2); ok {
-		t.Fatal("Get2(c2) returned ok=true, want false")
-	}
-	if _, ok := d.Get2(c3); ok {
-		t.Fatal("Get2(c3) returned ok=true, want false")
-	}
-
-	// Putting another c1 adds a new entry.
-	d.Put(c1, 4)
-	if d.Len() != 4 {
-		t.Fatalf("Len = %d, want 4", d.Len())
-	}
-
-	// Non-NaN complex works alongside NaNs.
-	regular := complex64(1 + 2i)
-	d.Put(regular, 42)
-	if got, ok := d.Get2(regular); !ok || got != 42 {
-		t.Fatalf("Get2(regular) = (%d, %v), want (42, true)", got, ok)
-	}
-	checkInvariants(t, d)
+	checkSingleNaNKey(t, d, []complex64{complex(nan, 0), complex(0, nan),
+		complex(nan, nan), complex(nan, 123), complex(456, nan)}, complex64(1+2i))
 }
 
 func testComplex128NaN(t *testing.T, d *Dict[complex128, int]) {
 	t.Helper()
 	nan := math.NaN()
-	c1 := complex(nan, 0)
-	c2 := complex(0, nan)
-	c3 := complex(nan, nan)
+	checkSingleNaNKey(t, d, []complex128{complex(nan, 0), complex(0, nan),
+		complex(nan, nan), complex(nan, 123), complex(456, nan)}, complex128(1+2i))
+}
 
-	d.Put(c1, 1)
-	d.Put(c2, 2)
-	d.Put(c3, 3)
-	if d.Len() != 3 {
-		t.Fatalf("Len = %d, want 3", d.Len())
+func checkSingleNaNKey[K comparable](t *testing.T, d *Dict[K, int], nans []K, regular K) {
+	t.Helper()
+	for i := 0; i < 1000; i++ {
+		if added := d.Put(nans[i%len(nans)], i+1); added != (i == 0) {
+			t.Fatalf("Put %d newlyAdded=%v, want %v", i, added, i == 0)
+		}
+		if d.Len() != 1 {
+			t.Fatalf("after %d NaN puts Len=%d, want 1", i+1, d.Len())
+		}
 	}
-
-	// None of the NaN complex numbers can be looked up with Get2 because == evaluates to false.
-	if _, ok := d.Get2(c1); ok {
-		t.Fatal("Get2(c1) returned ok=true, want false")
+	for _, nan := range nans {
+		if got, ok := d.Get2(nan); !ok || got != 1000 {
+			t.Fatalf("Get2(%v)=(%d,%v), want (1000,true)", nan, got, ok)
+		}
+		if got := d.Get(nan); got != 1000 {
+			t.Fatalf("Get(%v)=%d, want 1000", nan, got)
+		}
 	}
-	if _, ok := d.Get2(c2); ok {
-		t.Fatal("Get2(c2) returned ok=true, want false")
+	d.Put(regular, 2000)
+	var values []int
+	for _, v := range d.All() {
+		values = append(values, v)
 	}
-	if _, ok := d.Get2(c3); ok {
-		t.Fatal("Get2(c3) returned ok=true, want false")
+	if !slices.Equal(values, []int{1000, 2000}) {
+		t.Fatalf("iteration values=%v, want [1000 2000]", values)
 	}
-
-	// Putting another c1 adds a new entry.
-	d.Put(c1, 4)
-	if d.Len() != 4 {
-		t.Fatalf("Len = %d, want 4", d.Len())
+	checkInvariants(t, d)
+	clone := d.Clone()
+	if !clone.Del(nans[len(nans)-1]) || clone.Del(nans[0]) {
+		t.Fatal("NaN deletion did not remove exactly one key")
 	}
-
-	// Non-NaN complex works alongside NaNs.
-	regular := 1 + 2i
-	d.Put(regular, 42)
-	if got, ok := d.Get2(regular); !ok || got != 42 {
-		t.Fatalf("Get2(regular) = (%d, %v), want (42, true)", got, ok)
+	if clone.Len() != 1 || clone.Get(regular) != 2000 || d.Len() != 2 {
+		t.Fatal("deleting the cloned NaN affected other entries or the original")
+	}
+	clone.Pack(true)
+	checkInvariants(t, clone)
+	if !d.Del(nans[len(nans)-1]) || d.Del(nans[0]) {
+		t.Fatal("NaN deletion did not remove exactly one key")
+	}
+	if _, ok := d.Get2(nans[0]); ok {
+		t.Fatal("NaN key still found after deletion")
+	}
+	if !d.Put(nans[1], 3000) {
+		t.Fatal("reinserting deleted NaN did not add a key")
+	}
+	values = nil
+	for _, v := range d.SlowWriteAll() {
+		values = append(values, v)
+	}
+	if !slices.Equal(values, []int{2000, 3000}) {
+		t.Fatalf("reinsertion values=%v, want [2000 3000]", values)
 	}
 	checkInvariants(t, d)
 }

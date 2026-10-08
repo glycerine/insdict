@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestFloatingKeysAgainstMap(t *testing.T) {
+func TestFloatingKeysAgainstCanonicalMap(t *testing.T) {
 	f32 := []float32{0, math.Float32frombits(1 << 31), 1, -1, 1.5,
 		math.SmallestNonzeroFloat32, -math.SmallestNonzeroFloat32,
 		math.MaxFloat32, -math.MaxFloat32, float32(math.Inf(1)), float32(math.Inf(-1)),
@@ -49,14 +49,54 @@ func TestFloatingKeysAgainstMap(t *testing.T) {
 	})
 }
 
-// A linear list supplies insertion order and NaN payload identity. The built-in
-// map independently supplies Put/Get/Del semantics, length, and ranged values.
-// Values are unique operation IDs so NaN entries can be matched without lookup.
+// A linear list supplies insertion order and original key bits. A Go map keyed
+// by independently canonicalized bits supplies the requested NaN equivalence.
+// Neither oracle uses the dictionary's hash or equality helpers.
 func auditFloatingKeys[K comparable](t *testing.T, pool []K, easyHash func(K) uint64, bits func(K) [2]uint64) {
 	t.Helper()
+	canonical := func(k K) [2]uint64 {
+		b := bits(k)
+		switch x := any(k).(type) {
+		case float32:
+			if math.IsNaN(float64(x)) {
+				return [2]uint64{0x7fc00000}
+			}
+			if x == 0 {
+				b[0] = 0
+			}
+		case float64:
+			if math.IsNaN(x) {
+				return [2]uint64{0x7ff8000000000000}
+			}
+			if x == 0 {
+				b[0] = 0
+			}
+		case complex64:
+			if math.IsNaN(float64(real(x))) || math.IsNaN(float64(imag(x))) {
+				return [2]uint64{0x7fc00000, 0x7fc00000}
+			}
+			if real(x) == 0 {
+				b[0] = 0
+			}
+			if imag(x) == 0 {
+				b[1] = 0
+			}
+		case complex128:
+			if math.IsNaN(real(x)) || math.IsNaN(imag(x)) {
+				return [2]uint64{0x7ff8000000000000, 0x7ff8000000000000}
+			}
+			if real(x) == 0 {
+				b[0] = 0
+			}
+			if imag(x) == 0 {
+				b[1] = 0
+			}
+		}
+		return b
+	}
 	for _, a := range pool {
 		for _, b := range pool {
-			if a == b && (easyHash(a) != easyHash(b) || defaultHash(a) != defaultHash(b)) {
+			if canonical(a) == canonical(b) && (easyHash(a) != easyHash(b) || defaultHash(a) != defaultHash(b)) {
 				t.Fatalf("equal keys %v and %v have different hashes", a, b)
 			}
 		}
@@ -71,7 +111,7 @@ func auditFloatingKeys[K comparable](t *testing.T, pool []K, easyHash func(K) ui
 					d = NewDictFunc[K, int](func(K) uint64 { return 0 })
 				}
 				rng := rand.New(rand.NewSource(seed))
-				std := make(map[K]int)
+				std := make(map[[2]uint64]int)
 				type pair struct {
 					key K
 					val int
@@ -82,11 +122,11 @@ func auditFloatingKeys[K comparable](t *testing.T, pool []K, easyHash func(K) ui
 				nextValue := 0
 				put := func(k K) {
 					nextValue++
-					_, exists := std[k]
+					_, exists := std[canonical(k)]
 					if added := d.Put(k, nextValue); added != !exists {
 						t.Fatalf("Put(%v) newlyAdded=%v, want %v", k, added, !exists)
 					}
-					std[k] = nextValue
+					std[canonical(k)] = nextValue
 					p := pair{k, nextValue}
 					if !exists {
 						order = append(order, p)
@@ -95,25 +135,25 @@ func auditFloatingKeys[K comparable](t *testing.T, pool []K, easyHash func(K) ui
 						}
 					} else {
 						for i := range order {
-							if order[i].key == k {
+							if canonical(order[i].key) == canonical(k) {
 								order[i].val = nextValue
 							}
 						}
 						for i := range pending {
-							if pending[i].key == k {
+							if canonical(pending[i].key) == canonical(k) {
 								pending[i].val = nextValue
 							}
 						}
 					}
 				}
 				del := func(k K) {
-					_, exists := std[k]
+					_, exists := std[canonical(k)]
 					if found := d.Del(k); found != exists {
 						t.Fatalf("Del(%v)=%v, want %v", k, found, exists)
 					}
-					delete(std, k)
-					order = slices.DeleteFunc(order, func(p pair) bool { return p.key == k })
-					pending = slices.DeleteFunc(pending, func(p pair) bool { return p.key == k })
+					delete(std, canonical(k))
+					order = slices.DeleteFunc(order, func(p pair) bool { return canonical(p.key) == canonical(k) })
+					pending = slices.DeleteFunc(pending, func(p pair) bool { return canonical(p.key) == canonical(k) })
 				}
 				check := func() {
 					t.Helper()
@@ -122,7 +162,7 @@ func auditFloatingKeys[K comparable](t *testing.T, pool []K, easyHash func(K) ui
 						t.Fatalf("lengths: Dict=%d, map=%d, order=%d", d.Len(), len(std), len(order))
 					}
 					for _, k := range pool {
-						want, exists := std[k]
+						want, exists := std[canonical(k)]
 						if got, found := d.Get2(k); got != want || found != exists {
 							t.Fatalf("Get2(%v)=(%d,%v), map=(%d,%v)", k, got, found, want, exists)
 						}
@@ -130,7 +170,7 @@ func auditFloatingKeys[K comparable](t *testing.T, pool []K, easyHash func(K) ui
 							t.Fatalf("Get(%v)=%d, map=%d", k, got, want)
 						}
 					}
-					byValue := make(map[int]K)
+					byValue := make(map[int][2]uint64)
 					for k, v := range std {
 						byValue[v] = k
 					}
@@ -140,7 +180,7 @@ func auditFloatingKeys[K comparable](t *testing.T, pool []K, easyHash func(K) ui
 							t.Fatalf("iteration index %d: unexpected key bits %x, value %d", i, bits(k), v)
 						}
 						mk, exists := byValue[v]
-						if !exists || (k != mk && bits(k) != bits(mk)) {
+						if !exists || canonical(k) != mk {
 							t.Fatalf("ranged map lacks entry (%v, %d)", k, v)
 						}
 						i++
@@ -211,5 +251,75 @@ func auditFloatingKeys[K comparable](t *testing.T, pool []K, easyHash func(K) ui
 				}
 			})
 		}
+	}
+}
+
+func TestNamedNaNKeys(t *testing.T) {
+	type f32 float32
+	type f64 float64
+	type c64 complex64
+	type c128 complex128
+	t.Run("float32", func(t *testing.T) {
+		d := NewDictFunc[f32, int](func(k f32) uint64 { return EasyHashFloat32(float32(k)) })
+		checkSingleNaNKey(t, d, []f32{f32(math.Float32frombits(0x7fc00001)), f32(math.Float32frombits(0xffc00002))}, f32(1))
+	})
+	t.Run("float64", func(t *testing.T) {
+		d := NewDictFunc[f64, int](func(k f64) uint64 { return EasyHashFloat64(float64(k)) })
+		checkSingleNaNKey(t, d, []f64{f64(math.NaN()), f64(math.Float64frombits(0xfff8000000000002))}, f64(1))
+	})
+	t.Run("complex64", func(t *testing.T) {
+		d := NewDictFunc[c64, int](func(k c64) uint64 { return EasyHashComplex64(complex64(k)) })
+		nan := float32(math.NaN())
+		checkSingleNaNKey(t, d, []c64{c64(complex(nan, 1)), c64(complex(2, nan))}, c64(1+2i))
+	})
+	t.Run("complex128", func(t *testing.T) {
+		d := NewDictFunc[c128, int](func(k c128) uint64 { return EasyHashComplex128(complex128(k)) })
+		checkSingleNaNKey(t, d, []c128{c128(complex(math.NaN(), 1)), c128(complex(2, math.NaN()))}, c128(1+2i))
+	})
+}
+
+func TestNaNInterfaceKeyTypes(t *testing.T) {
+	type namedFloat float64
+	type namedComplex complex128
+	// Deliberately collide all types to verify dynamic type identity is
+	// preserved even when their canonical hashes happen to match.
+	for _, mode := range []string{"default", "constant"} {
+		t.Run(mode, func(t *testing.T) {
+			d := NewDict[any, int]()
+			if mode == "constant" {
+				d = NewDictFunc[any, int](func(any) uint64 { return 0 })
+			}
+			pairs := [][2]any{
+				{float32(math.NaN()), math.Float32frombits(0xffc00002)},
+				{math.NaN(), math.Float64frombits(0xfff8000000000002)},
+				{complex(float32(math.NaN()), float32(1)), complex(float32(2), float32(math.NaN()))},
+				{complex(math.NaN(), 1), complex(2, math.NaN())},
+			}
+			if mode == "constant" {
+				pairs = append(pairs,
+					[2]any{namedFloat(math.NaN()), namedFloat(math.Float64frombits(0xfff8000000000002))},
+					[2]any{namedComplex(complex(math.NaN(), 1)), namedComplex(complex(2, math.NaN()))})
+			}
+			for i, p := range pairs {
+				if !d.Put(p[0], i+1) || d.Put(p[1], i+100) {
+					t.Fatalf("type %T did not maintain exactly one NaN key", p[0])
+				}
+			}
+			if d.Len() != len(pairs) {
+				t.Fatalf("Len=%d, want %d distinct dynamic types", d.Len(), len(pairs))
+			}
+			for i, p := range pairs {
+				if v, ok := d.Get2(p[0]); !ok || v != i+100 {
+					t.Fatalf("Get2(%T)=(%d,%v), want (%d,true)", p[0], v, ok, i+100)
+				}
+			}
+			checkInvariants(t, d)
+			for _, p := range pairs {
+				if !d.Del(p[1]) || d.Del(p[0]) {
+					t.Fatalf("deletion of type %T did not remove exactly one key", p[0])
+				}
+			}
+			checkInvariants(t, d)
+		})
 	}
 }

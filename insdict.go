@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"reflect"
 	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
@@ -35,6 +36,10 @@ type entry[K comparable, V any] struct {
 // key types need the user to supply the hash function, and so require
 // a call to NewDictFunc to set up. The internal defaultHash() panics to enforce this.
 //
+// NaNs of a given floating-point type compare equal as keys, regardless of sign or payload.
+// All NaN-containing values of a given complex type also compare equal.
+// Updating a key preserves its original insertion position and stored key.
+//
 // Pre-allocating with NewDictSize or NewDictFuncSize can save
 // time and memory by avoiding table rebuilds on growth; benchmark your use.
 //
@@ -60,6 +65,9 @@ func NewDict[K comparable, V any]() *Dict[K, V] {
 }
 
 // NewDictFunc lets callers supply a hash for key types the default doesn't know.
+// Equal keys must have identical hashes, including all NaN representations for
+// floating-point keys and all NaN-containing values of a given complex type.
+// The EasyHashFloat* and EasyHashComplex* helpers satisfy this rule.
 func NewDictFunc[K comparable, V any](hash func(K) uint64) *Dict[K, V] {
 	return &Dict[K, V]{hash: hash}
 }
@@ -208,27 +216,73 @@ func EasyHashUintptr(key uintptr) uint64 { return Mix64(uint64(key)) }
 func EasyHashByte(key byte) uint64 { return Mix64(uint64(key)) }
 func EasyHashRune(key rune) uint64 { return Mix64(uint64(key)) }
 
-// EasyHashFloat32 note: normalizes -0.0 to +0.0 so both yield identical hashes,
-// consistent with Go equality +0.0 == -0.0.
+// float32KeyBits normalizes signed zero and all NaN representations.
+func float32KeyBits(key float32) uint32 {
+	if key == 0 {
+		return 0
+	}
+	if key != key {
+		return 0x7fc00000
+	}
+	return math.Float32bits(key)
+}
+
+func float64KeyBits(key float64) uint64 {
+	if key == 0 {
+		return 0
+	}
+	if key != key {
+		return 0x7ff8000000000000
+	}
+	return math.Float64bits(key)
+}
+
+// EasyHashFloat32 normalizes signed zero and all NaN representations so
+// equivalent dictionary keys have identical hashes.
 func EasyHashFloat32(key float32) uint64 {
-	if key == 0 {
-		key = 0
-	}
-	return Mix64(uint64(math.Float32bits(key)))
+	return Mix64(uint64(float32KeyBits(key)))
 }
 
-// EasyHashFloat64 note: normalizes -0.0 to +0.0 so both yield identical hashes,
-// consistent with Go equality +0.0 == -0.0.
+// EasyHashFloat64 normalizes signed zero and all NaN representations.
 func EasyHashFloat64(key float64) uint64 {
-	if key == 0 {
-		key = 0
-	}
-	return Mix64(math.Float64bits(key))
+	return Mix64(float64KeyBits(key))
 }
 
-// EasyHashComplex64 note: normalizes zero components, packs real
+// equalNaNKeys handles floating-point and complex keys that Go's == cannot match.
+// Call only after ordinary equality fails and both keys are non-reflexive.
+func equalNaNKeys[K comparable](a, b K) bool {
+	switch any(a).(type) {
+	case float32:
+		_, ok := any(b).(float32)
+		return ok
+	case float64:
+		_, ok := any(b).(float64)
+		return ok
+	case complex64:
+		_, ok := any(b).(complex64)
+		return ok
+	case complex128:
+		_, ok := any(b).(complex128)
+		return ok
+	default:
+		// Named floating-point and complex types require a custom hash but share the
+		// same NaN equality. Preserve dynamic type identity for interface keys.
+		x, y := reflect.ValueOf(a), reflect.ValueOf(b)
+		if x.Type() != y.Type() {
+			return false
+		}
+		return x.Kind() == reflect.Float32 || x.Kind() == reflect.Float64 ||
+			x.Kind() == reflect.Complex64 || x.Kind() == reflect.Complex128
+	}
+}
+
+// EasyHashComplex64 maps all NaN-containing values to one hash.
+// Otherwise it normalizes zero components, packs real
 // and imaginary 32-bit float bits into uint64, and mixes with Mix64.
 func EasyHashComplex64(key complex64) uint64 {
+	if key != key {
+		return Mix64(0x7fc000007fc00000)
+	}
 	r := real(key)
 	if r == 0 {
 		r = 0
@@ -240,9 +294,13 @@ func EasyHashComplex64(key complex64) uint64 {
 	return Mix64((uint64(math.Float32bits(r)) << 32) | uint64(math.Float32bits(im)))
 }
 
-// EasyHashComplex128 note: normalizes zero components and
+// EasyHashComplex128 maps all NaN-containing values to one hash.
+// Otherwise it normalizes zero components and
 // mixes real and imaginary 64-bit float bits with Mix64.
 func EasyHashComplex128(key complex128) uint64 {
+	if key != key {
+		return Mix64(0x7ff8000000000000)
+	}
 	r := real(key)
 	if r == 0 {
 		r = 0
@@ -291,7 +349,7 @@ func (d *Dict[K, V]) Get2(k K) (v V, found bool) {
 		if ctrl == tag {
 			ix := d.indices[i]
 			e := &d.entries[ix]
-			if e.hash == h && e.key == k {
+			if e.hash == h && (e.key == k || (e.key != e.key && k != k && equalNaNKeys(e.key, k))) {
 				return e.val, true
 			}
 		} else if ctrl == tagEmpty {
@@ -338,7 +396,7 @@ func (d *Dict[K, V]) find(k K, h uint64, tag byte) (slot int, ix int64) {
 		if d.tags[i] == tag {
 			ix = d.indices[i]
 			e := &d.entries[ix]
-			if e.hash == h && e.key == k {
+			if e.hash == h && (e.key == k || (e.key != e.key && k != k && equalNaNKeys(e.key, k))) {
 				return int(i), ix
 			}
 		}
