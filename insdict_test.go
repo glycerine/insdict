@@ -944,6 +944,231 @@ func testComplex128Zero(t *testing.T, d *Dict[complex128, string]) {
 	}
 }
 
+func TestNaNKeys(t *testing.T) {
+	t.Run("float32 default", func(t *testing.T) {
+		testFloat32NaN(t, NewDict[float32, int]())
+	})
+	t.Run("float32 EasyHash", func(t *testing.T) {
+		testFloat32NaN(t, NewDictFunc[float32, int](EasyHashFloat32))
+	})
+	t.Run("float64 default", func(t *testing.T) {
+		testFloat64NaN(t, NewDict[float64, int]())
+	})
+	t.Run("float64 EasyHash", func(t *testing.T) {
+		testFloat64NaN(t, NewDictFunc[float64, int](EasyHashFloat64))
+	})
+	t.Run("complex64 default", func(t *testing.T) {
+		testComplex64NaN(t, NewDict[complex64, int]())
+	})
+	t.Run("complex64 EasyHash", func(t *testing.T) {
+		testComplex64NaN(t, NewDictFunc[complex64, int](EasyHashComplex64))
+	})
+	t.Run("complex128 default", func(t *testing.T) {
+		testComplex128NaN(t, NewDict[complex128, int]())
+	})
+	t.Run("complex128 EasyHash", func(t *testing.T) {
+		testComplex128NaN(t, NewDictFunc[complex128, int](EasyHashComplex128))
+	})
+}
+
+func testFloat32NaN(t *testing.T, d *Dict[float32, int]) {
+	t.Helper()
+	nan := float32(math.NaN())
+
+	// Each NaN insertion adds a new entry since nan == nan is false in Go (matching built-in map behavior).
+	for i := 1; i <= 50; i++ {
+		d.Put(nan, i)
+		if d.Len() != i {
+			t.Fatalf("after %d NaN puts, Len = %d, want %d", i, d.Len(), i)
+		}
+	}
+
+	// Lookup for NaN key should never match any key.
+	if _, ok := d.Get2(nan); ok {
+		t.Fatal("Get2(NaN) returned ok=true, want false")
+	}
+	if got := d.Get(nan); got != 0 {
+		t.Fatalf("Get(NaN) = %d, want 0", got)
+	}
+
+	// Del with NaN key should not delete anything because NaN != NaN.
+	if d.Del(nan) {
+		t.Fatal("Del(NaN) returned true, want false")
+	}
+	if d.Len() != 50 {
+		t.Fatalf("Len after Del(NaN) = %d, want 50", d.Len())
+	}
+
+	// Range All yields all NaN entries in insertion order.
+	idx := 1
+	for k, v := range d.All() {
+		if !math.IsNaN(float64(k)) {
+			t.Fatalf("entry key %v is not NaN", k)
+		}
+		if v != idx {
+			t.Fatalf("entry value = %d, want %d", v, idx)
+		}
+		idx++
+	}
+	if idx != 51 {
+		t.Fatalf("iterated %d entries, want 50", idx-1)
+	}
+
+	// Non-NaN keys work normally alongside NaNs.
+	d.Put(1.0, 100)
+	d.Put(2.0, 200)
+	if got, ok := d.Get2(1.0); !ok || got != 100 {
+		t.Fatalf("Get2(1.0) = (%d, %v), want (100, true)", got, ok)
+	}
+	if got, ok := d.Get2(2.0); !ok || got != 200 {
+		t.Fatalf("Get2(2.0) = (%d, %v), want (200, true)", got, ok)
+	}
+	if !d.Del(1.0) {
+		t.Fatal("Del(1.0) failed")
+	}
+	if d.Len() != 51 {
+		t.Fatalf("Len = %d, want 51", d.Len())
+	}
+}
+
+func testFloat64NaN(t *testing.T, d *Dict[float64, int]) {
+	t.Helper()
+	nan := math.NaN()
+
+	// Each NaN insertion adds a new entry since nan == nan is false in Go.
+	for i := 1; i <= 50; i++ {
+		d.Put(nan, i)
+		if d.Len() != i {
+			t.Fatalf("after %d NaN puts, Len = %d, want %d", i, d.Len(), i)
+		}
+	}
+
+	// Lookup for NaN key should never match any key.
+	if _, ok := d.Get2(nan); ok {
+		t.Fatal("Get2(NaN) returned ok=true, want false")
+	}
+	if got := d.Get(nan); got != 0 {
+		t.Fatalf("Get(NaN) = %d, want 0", got)
+	}
+
+	// Del with NaN key should not delete anything because NaN != NaN.
+	if d.Del(nan) {
+		t.Fatal("Del(NaN) returned true, want false")
+	}
+	if d.Len() != 50 {
+		t.Fatalf("Len after Del(NaN) = %d, want 50", d.Len())
+	}
+
+	// Range All yields all NaN entries in insertion order.
+	idx := 1
+	for k, v := range d.All() {
+		if !math.IsNaN(k) {
+			t.Fatalf("entry key %v is not NaN", k)
+		}
+		if v != idx {
+			t.Fatalf("entry value = %d, want %d", v, idx)
+		}
+		idx++
+	}
+	if idx != 51 {
+		t.Fatalf("iterated %d entries, want 50", idx-1)
+	}
+
+	// Non-NaN keys work normally alongside NaNs.
+	d.Put(1.0, 100)
+	d.Put(2.0, 200)
+	if got, ok := d.Get2(1.0); !ok || got != 100 {
+		t.Fatalf("Get2(1.0) = (%d, %v), want (100, true)", got, ok)
+	}
+	if got, ok := d.Get2(2.0); !ok || got != 200 {
+		t.Fatalf("Get2(2.0) = (%d, %v), want (200, true)", got, ok)
+	}
+	if !d.Del(1.0) {
+		t.Fatal("Del(1.0) failed")
+	}
+	if d.Len() != 51 {
+		t.Fatalf("Len = %d, want 51", d.Len())
+	}
+}
+
+func testComplex64NaN(t *testing.T, d *Dict[complex64, int]) {
+	t.Helper()
+	nan := float32(math.NaN())
+	c1 := complex(nan, 0)
+	c2 := complex(0, nan)
+	c3 := complex(nan, nan)
+
+	d.Put(c1, 1)
+	d.Put(c2, 2)
+	d.Put(c3, 3)
+	if d.Len() != 3 {
+		t.Fatalf("Len = %d, want 3", d.Len())
+	}
+
+	// None of the NaN complex numbers can be looked up with Get2 because == evaluates to false.
+	if _, ok := d.Get2(c1); ok {
+		t.Fatal("Get2(c1) returned ok=true, want false")
+	}
+	if _, ok := d.Get2(c2); ok {
+		t.Fatal("Get2(c2) returned ok=true, want false")
+	}
+	if _, ok := d.Get2(c3); ok {
+		t.Fatal("Get2(c3) returned ok=true, want false")
+	}
+
+	// Putting another c1 adds a new entry.
+	d.Put(c1, 4)
+	if d.Len() != 4 {
+		t.Fatalf("Len = %d, want 4", d.Len())
+	}
+
+	// Non-NaN complex works alongside NaNs.
+	regular := complex64(1 + 2i)
+	d.Put(regular, 42)
+	if got, ok := d.Get2(regular); !ok || got != 42 {
+		t.Fatalf("Get2(regular) = (%d, %v), want (42, true)", got, ok)
+	}
+}
+
+func testComplex128NaN(t *testing.T, d *Dict[complex128, int]) {
+	t.Helper()
+	nan := math.NaN()
+	c1 := complex(nan, 0)
+	c2 := complex(0, nan)
+	c3 := complex(nan, nan)
+
+	d.Put(c1, 1)
+	d.Put(c2, 2)
+	d.Put(c3, 3)
+	if d.Len() != 3 {
+		t.Fatalf("Len = %d, want 3", d.Len())
+	}
+
+	// None of the NaN complex numbers can be looked up with Get2 because == evaluates to false.
+	if _, ok := d.Get2(c1); ok {
+		t.Fatal("Get2(c1) returned ok=true, want false")
+	}
+	if _, ok := d.Get2(c2); ok {
+		t.Fatal("Get2(c2) returned ok=true, want false")
+	}
+	if _, ok := d.Get2(c3); ok {
+		t.Fatal("Get2(c3) returned ok=true, want false")
+	}
+
+	// Putting another c1 adds a new entry.
+	d.Put(c1, 4)
+	if d.Len() != 4 {
+		t.Fatalf("Len = %d, want 4", d.Len())
+	}
+
+	// Non-NaN complex works alongside NaNs.
+	regular := 1 + 2i
+	d.Put(regular, 42)
+	if got, ok := d.Get2(regular); !ok || got != 42 {
+		t.Fatalf("Get2(regular) = (%d, %v), want (42, true)", got, ok)
+	}
+}
+
 // Two dicts fed the same operation sequence must end up bit-for-bit identical.
 // This is what makes the structure usable inside deterministic simulation.
 func TestDeterministicLayout(t *testing.T) {
