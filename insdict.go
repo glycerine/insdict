@@ -30,7 +30,8 @@ type entry[K comparable, V any] struct {
 // For built-in comparable key types, the zero value Dict
 // is perfectly usable and needs no NewDict() call. The built-in
 // comparable key types are: string, int, int8, int16,
-// int32, int64, uint, uint8, uint16, uint32, uint64, bool. Other
+// int32, int64, uint, uint8, uint16, uint32, uint64, uintptr,
+// float32, float64, complex64, complex128, bool, byte, rune. Other
 // key types need the user to supply the hash function, and so require
 // a call to NewDictFunc to set up. The internal defaultHash() panics to enforce this.
 //
@@ -134,13 +135,13 @@ func defaultHash[K comparable](k K) uint64 {
 		return Mix64(uint64(v))
 	case int16:
 		return Mix64(uint64(v))
-	case int32:
+	case int32: // covers rune
 		return Mix64(uint64(v))
 	case int64:
 		return Mix64(uint64(v))
 	case uint:
 		return Mix64(uint64(v))
-	case uint8:
+	case uint8: // covers byte
 		return Mix64(uint64(v))
 	case uint16:
 		return Mix64(uint64(v))
@@ -150,6 +151,14 @@ func defaultHash[K comparable](k K) uint64 {
 		return Mix64(v)
 	case uintptr:
 		return Mix64(uint64(v))
+	case float32:
+		return EasyHashFloat32(v)
+	case float64:
+		return EasyHashFloat64(v)
+	case complex64:
+		return EasyHashComplex64(v)
+	case complex128:
+		return EasyHashComplex128(v)
 	case bool:
 		if v {
 			return Mix64(1)
@@ -195,6 +204,55 @@ func EasyHashUint32(key uint32) uint64 { return Mix64(uint64(key)) }
 func EasyHashUint64(key uint64) uint64 { return Mix64(key) }
 
 func EasyHashUintptr(key uintptr) uint64 { return Mix64(uint64(key)) }
+
+func EasyHashByte(key byte) uint64 { return Mix64(uint64(key)) }
+func EasyHashRune(key rune) uint64 { return Mix64(uint64(key)) }
+
+// EasyHashFloat32 note: normalizes -0.0 to +0.0 so both yield identical hashes,
+// consistent with Go equality +0.0 == -0.0.
+func EasyHashFloat32(key float32) uint64 {
+	if key == 0 {
+		key = 0
+	}
+	return Mix64(uint64(math.Float32bits(key)))
+}
+
+// EasyHashFloat64 note: normalizes -0.0 to +0.0 so both yield identical hashes,
+// consistent with Go equality +0.0 == -0.0.
+func EasyHashFloat64(key float64) uint64 {
+	if key == 0 {
+		key = 0
+	}
+	return Mix64(math.Float64bits(key))
+}
+
+// EasyHashComplex64 note: normalizes zero components, packs real
+// and imaginary 32-bit float bits into uint64, and mixes with Mix64.
+func EasyHashComplex64(key complex64) uint64 {
+	r := real(key)
+	if r == 0 {
+		r = 0
+	}
+	im := imag(key)
+	if im == 0 {
+		im = 0
+	}
+	return Mix64((uint64(math.Float32bits(r)) << 32) | uint64(math.Float32bits(im)))
+}
+
+// EasyHashComplex128 note: normalizes zero components and
+// mixes real and imaginary 64-bit float bits with Mix64.
+func EasyHashComplex128(key complex128) uint64 {
+	r := real(key)
+	if r == 0 {
+		r = 0
+	}
+	im := imag(key)
+	if im == 0 {
+		im = 0
+	}
+	return Mix64(Mix64(math.Float64bits(r)) ^ math.Float64bits(im))
+}
 
 // Len returns the number of live entries.
 func (d *Dict[K, V]) Len() int {

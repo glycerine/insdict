@@ -2,6 +2,7 @@ package insdict
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"reflect"
 	"slices"
@@ -632,6 +633,17 @@ func TestDefaultHashSupportedTypes(t *testing.T) {
 	t.Run("uint32", func(t *testing.T) { roundTrip(t, []uint32{0, 1, 1 << 31}) })
 	t.Run("uint64", func(t *testing.T) { roundTrip(t, []uint64{0, 1, 1 << 63}) })
 	t.Run("bool", func(t *testing.T) { roundTrip(t, []bool{false, true}) })
+	t.Run("byte", func(t *testing.T) { roundTrip(t, []byte{0, 1, 255}) })
+	t.Run("rune", func(t *testing.T) { roundTrip(t, []rune{0, 'a', '世', 1 << 30, -(1 << 30)}) })
+	t.Run("uintptr", func(t *testing.T) { roundTrip(t, []uintptr{0, 1, 1 << 40}) })
+	t.Run("float32", func(t *testing.T) {
+		roundTrip(t, []float32{0, 1, -1, 3.14, float32(math.Inf(1)), float32(math.Inf(-1))})
+	})
+	t.Run("float64", func(t *testing.T) {
+		roundTrip(t, []float64{0, 1, -1, 3.14159265, math.Inf(1), math.Inf(-1)})
+	})
+	t.Run("complex64", func(t *testing.T) { roundTrip(t, []complex64{0, 1, 1i, 1 + 2i, -1 - 2i}) })
+	t.Run("complex128", func(t *testing.T) { roundTrip(t, []complex128{0, 1, 1i, 1 + 2i, -1 - 2i}) })
 }
 
 func roundTrip[K comparable](t *testing.T, keys []K) {
@@ -654,6 +666,7 @@ func roundTrip[K comparable](t *testing.T, keys []K) {
 func TestDefaultHashPanicsOnUnsupportedKey(t *testing.T) {
 	type S struct{ A int }
 	type ID uint64 // named types don't match the type switch
+	type F float64
 
 	mustPanic := func(name string, f func()) {
 		t.Helper()
@@ -666,7 +679,8 @@ func TestDefaultHashPanicsOnUnsupportedKey(t *testing.T) {
 	}
 	mustPanic("struct", func() { NewDict[S, int]().Put(S{1}, 1) })
 	mustPanic("named uint64", func() { NewDict[ID, int]().Put(ID(1), 1) })
-	mustPanic("float64", func() { NewDict[float64, int]().Put(1.5, 1) })
+	mustPanic("named float64", func() { NewDict[F, int]().Put(F(1.5), 1) })
+	mustPanic("array", func() { NewDict[[2]int, int]().Put([2]int{1, 2}, 1) })
 }
 
 func TestCustomHashOverridesDefault(t *testing.T) {
@@ -702,6 +716,231 @@ func TestHashDeterministic(t *testing.T) {
 		if defaultHash(i) != defaultHash(i) {
 			t.Fatalf("defaultHash(%d) not stable", i)
 		}
+		b := byte(i % 256)
+		if defaultHash(b) != defaultHash(b) || defaultHash(b) != EasyHashByte(b) {
+			t.Fatalf("defaultHash(byte %d) not stable or mismatch with EasyHashByte", b)
+		}
+		r := rune(i)
+		if defaultHash(r) != defaultHash(r) || defaultHash(r) != EasyHashRune(r) {
+			t.Fatalf("defaultHash(rune %d) not stable or mismatch with EasyHashRune", r)
+		}
+		f32 := float32(i) * 0.125
+		if defaultHash(f32) != defaultHash(f32) || defaultHash(f32) != EasyHashFloat32(f32) {
+			t.Fatalf("defaultHash(float32 %v) not stable or mismatch with EasyHashFloat32", f32)
+		}
+		f64 := float64(i) * 0.125
+		if defaultHash(f64) != defaultHash(f64) || defaultHash(f64) != EasyHashFloat64(f64) {
+			t.Fatalf("defaultHash(float64 %v) not stable or mismatch with EasyHashFloat64", f64)
+		}
+		c64 := complex(float32(i), float32(-i))
+		if defaultHash(c64) != defaultHash(c64) || defaultHash(c64) != EasyHashComplex64(c64) {
+			t.Fatalf("defaultHash(complex64 %v) not stable or mismatch with EasyHashComplex64", c64)
+		}
+		c128 := complex(float64(i), float64(-i))
+		if defaultHash(c128) != defaultHash(c128) || defaultHash(c128) != EasyHashComplex128(c128) {
+			t.Fatalf("defaultHash(complex128 %v) not stable or mismatch with EasyHashComplex128", c128)
+		}
+	}
+}
+
+func TestEasyHashFuncs(t *testing.T) {
+	// byte
+	dByte := NewDictFunc[byte, string](EasyHashByte)
+	dByte.Put(10, "ten")
+	if dByte.Get(10) != "ten" {
+		t.Fatal("EasyHashByte failed")
+	}
+
+	// rune
+	dRune := NewDictFunc[rune, string](EasyHashRune)
+	dRune.Put('世', "world")
+	if dRune.Get('世') != "world" {
+		t.Fatal("EasyHashRune failed")
+	}
+
+	// float32
+	dF32 := NewDictFunc[float32, string](EasyHashFloat32)
+	dF32.Put(1.5, "one-point-five")
+	if dF32.Get(1.5) != "one-point-five" {
+		t.Fatal("EasyHashFloat32 failed")
+	}
+
+	// float64
+	dF64 := NewDictFunc[float64, string](EasyHashFloat64)
+	dF64.Put(2.5, "two-point-five")
+	if dF64.Get(2.5) != "two-point-five" {
+		t.Fatal("EasyHashFloat64 failed")
+	}
+
+	// complex64
+	dC64 := NewDictFunc[complex64, string](EasyHashComplex64)
+	dC64.Put(1+2i, "c64")
+	if dC64.Get(1+2i) != "c64" {
+		t.Fatal("EasyHashComplex64 failed")
+	}
+
+	// complex128
+	dC128 := NewDictFunc[complex128, string](EasyHashComplex128)
+	dC128.Put(3+4i, "c128")
+	if dC128.Get(3+4i) != "c128" {
+		t.Fatal("EasyHashComplex128 failed")
+	}
+}
+
+func TestFloatZeroEquivalence(t *testing.T) {
+	t.Run("float32 default", func(t *testing.T) {
+		testFloat32Zero(t, NewDict[float32, string]())
+	})
+	t.Run("float32 EasyHash", func(t *testing.T) {
+		testFloat32Zero(t, NewDictFunc[float32, string](EasyHashFloat32))
+	})
+	t.Run("float64 default", func(t *testing.T) {
+		testFloat64Zero(t, NewDict[float64, string]())
+	})
+	t.Run("float64 EasyHash", func(t *testing.T) {
+		testFloat64Zero(t, NewDictFunc[float64, string](EasyHashFloat64))
+	})
+	t.Run("complex64 default", func(t *testing.T) {
+		testComplex64Zero(t, NewDict[complex64, string]())
+	})
+	t.Run("complex64 EasyHash", func(t *testing.T) {
+		testComplex64Zero(t, NewDictFunc[complex64, string](EasyHashComplex64))
+	})
+	t.Run("complex128 default", func(t *testing.T) {
+		testComplex128Zero(t, NewDict[complex128, string]())
+	})
+	t.Run("complex128 EasyHash", func(t *testing.T) {
+		testComplex128Zero(t, NewDictFunc[complex128, string](EasyHashComplex128))
+	})
+}
+
+func testFloat32Zero(t *testing.T, d *Dict[float32, string]) {
+	t.Helper()
+	posZero := float32(0.0)
+	negZero := float32(math.Copysign(0, -1))
+	if EasyHashFloat32(posZero) != EasyHashFloat32(negZero) {
+		t.Fatalf("EasyHashFloat32(+0.0) != EasyHashFloat32(-0.0)")
+	}
+	if defaultHash(posZero) != defaultHash(negZero) {
+		t.Fatalf("defaultHash(+0.0) != defaultHash(-0.0)")
+	}
+
+	d.Put(posZero, "pos")
+	if got, ok := d.Get2(negZero); !ok || got != "pos" {
+		t.Fatalf("Get2(-0.0) = (%q, %v), want (\"pos\", true)", got, ok)
+	}
+	d.Put(negZero, "neg")
+	if d.Len() != 1 {
+		t.Fatalf("Len() = %d after overwrite, want 1", d.Len())
+	}
+	if got := d.Get(posZero); got != "neg" {
+		t.Fatalf("Get(+0.0) = %q, want \"neg\"", got)
+	}
+	if !d.Del(negZero) {
+		t.Fatal("Del(-0.0) failed")
+	}
+	if d.Len() != 0 {
+		t.Fatalf("Len() = %d after Del, want 0", d.Len())
+	}
+}
+
+func testFloat64Zero(t *testing.T, d *Dict[float64, string]) {
+	t.Helper()
+	posZero := 0.0
+	negZero := math.Copysign(0, -1)
+	if EasyHashFloat64(posZero) != EasyHashFloat64(negZero) {
+		t.Fatalf("EasyHashFloat64(+0.0) != EasyHashFloat64(-0.0)")
+	}
+	if defaultHash(posZero) != defaultHash(negZero) {
+		t.Fatalf("defaultHash(+0.0) != defaultHash(-0.0)")
+	}
+
+	d.Put(posZero, "pos")
+	if got, ok := d.Get2(negZero); !ok || got != "pos" {
+		t.Fatalf("Get2(-0.0) = (%q, %v), want (\"pos\", true)", got, ok)
+	}
+	d.Put(negZero, "neg")
+	if d.Len() != 1 {
+		t.Fatalf("Len() = %d after overwrite, want 1", d.Len())
+	}
+	if got := d.Get(posZero); got != "neg" {
+		t.Fatalf("Get(+0.0) = %q, want \"neg\"", got)
+	}
+	if !d.Del(negZero) {
+		t.Fatal("Del(-0.0) failed")
+	}
+	if d.Len() != 0 {
+		t.Fatalf("Len() = %d after Del, want 0", d.Len())
+	}
+}
+
+func testComplex64Zero(t *testing.T, d *Dict[complex64, string]) {
+	t.Helper()
+	z1 := complex(float32(0.0), float32(0.0))
+	z2 := complex(float32(math.Copysign(0, -1)), float32(0.0))
+	z3 := complex(float32(0.0), float32(math.Copysign(0, -1)))
+	z4 := complex(float32(math.Copysign(0, -1)), float32(math.Copysign(0, -1)))
+
+	h1 := EasyHashComplex64(z1)
+	if EasyHashComplex64(z2) != h1 || EasyHashComplex64(z3) != h1 || EasyHashComplex64(z4) != h1 {
+		t.Fatal("EasyHashComplex64 zeros do not have identical hash")
+	}
+	dh1 := defaultHash(z1)
+	if defaultHash(z2) != dh1 || defaultHash(z3) != dh1 || defaultHash(z4) != dh1 {
+		t.Fatal("defaultHash complex64 zeros do not have identical hash")
+	}
+
+	d.Put(z1, "z1")
+	if got, ok := d.Get2(z2); !ok || got != "z1" {
+		t.Fatalf("Get2(z2) = (%q, %v), want (\"z1\", true)", got, ok)
+	}
+	d.Put(z3, "z3")
+	if d.Len() != 1 {
+		t.Fatalf("Len() = %d, want 1", d.Len())
+	}
+	if got := d.Get(z4); got != "z3" {
+		t.Fatalf("Get(z4) = %q, want \"z3\"", got)
+	}
+	if !d.Del(z2) {
+		t.Fatal("Del(z2) failed")
+	}
+	if d.Len() != 0 {
+		t.Fatalf("Len() = %d, want 0", d.Len())
+	}
+}
+
+func testComplex128Zero(t *testing.T, d *Dict[complex128, string]) {
+	t.Helper()
+	z1 := complex(0.0, 0.0)
+	z2 := complex(math.Copysign(0, -1), 0.0)
+	z3 := complex(0.0, math.Copysign(0, -1))
+	z4 := complex(math.Copysign(0, -1), math.Copysign(0, -1))
+
+	h1 := EasyHashComplex128(z1)
+	if EasyHashComplex128(z2) != h1 || EasyHashComplex128(z3) != h1 || EasyHashComplex128(z4) != h1 {
+		t.Fatal("EasyHashComplex128 zeros do not have identical hash")
+	}
+	dh1 := defaultHash(z1)
+	if defaultHash(z2) != dh1 || defaultHash(z3) != dh1 || defaultHash(z4) != dh1 {
+		t.Fatal("defaultHash complex128 zeros do not have identical hash")
+	}
+
+	d.Put(z1, "z1")
+	if got, ok := d.Get2(z2); !ok || got != "z1" {
+		t.Fatalf("Get2(z2) = (%q, %v), want (\"z1\", true)", got, ok)
+	}
+	d.Put(z3, "z3")
+	if d.Len() != 1 {
+		t.Fatalf("Len() = %d, want 1", d.Len())
+	}
+	if got := d.Get(z4); got != "z3" {
+		t.Fatalf("Get(z4) = %q, want \"z3\"", got)
+	}
+	if !d.Del(z2) {
+		t.Fatal("Del(z2) failed")
+	}
+	if d.Len() != 0 {
+		t.Fatalf("Len() = %d, want 0", d.Len())
 	}
 }
 
