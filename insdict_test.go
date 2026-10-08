@@ -661,12 +661,12 @@ func TestStructKeysWithCustomHash(t *testing.T) {
 
 func TestDefaultHashSupportedTypes(t *testing.T) {
 	t.Run("string", func(t *testing.T) { roundTrip(t, []string{"", "a", "b", "héllo", "a\x00b"}) })
-	t.Run("int", func(t *testing.T) { roundTrip(t, []int{0, 1, -1, 1 << 40, -(1 << 40)}) })
+	t.Run("int", func(t *testing.T) { roundTrip(t, []int{0, 1, -1, math.MaxInt, math.MinInt}) })
 	t.Run("int8", func(t *testing.T) { roundTrip(t, []int8{0, 1, -1, 127, -128}) })
 	t.Run("int16", func(t *testing.T) { roundTrip(t, []int16{0, 1, -1, 32767, -32768}) })
 	t.Run("int32", func(t *testing.T) { roundTrip(t, []int32{0, 1, -1, 1 << 30, -(1 << 30)}) })
 	t.Run("int64", func(t *testing.T) { roundTrip(t, []int64{0, 1, -1, 1 << 62, -(1 << 62)}) })
-	t.Run("uint", func(t *testing.T) { roundTrip(t, []uint{0, 1, 1 << 40}) })
+	t.Run("uint", func(t *testing.T) { roundTrip(t, []uint{0, 1, ^uint(0)}) })
 	t.Run("uint8", func(t *testing.T) { roundTrip(t, []uint8{0, 1, 255}) })
 	t.Run("uint16", func(t *testing.T) { roundTrip(t, []uint16{0, 1, 65535}) })
 	t.Run("uint32", func(t *testing.T) { roundTrip(t, []uint32{0, 1, 1 << 31}) })
@@ -674,7 +674,7 @@ func TestDefaultHashSupportedTypes(t *testing.T) {
 	t.Run("bool", func(t *testing.T) { roundTrip(t, []bool{false, true}) })
 	t.Run("byte", func(t *testing.T) { roundTrip(t, []byte{0, 1, 255}) })
 	t.Run("rune", func(t *testing.T) { roundTrip(t, []rune{0, 'a', '世', 1 << 30, -(1 << 30)}) })
-	t.Run("uintptr", func(t *testing.T) { roundTrip(t, []uintptr{0, 1, 1 << 40}) })
+	t.Run("uintptr", func(t *testing.T) { roundTrip(t, []uintptr{0, 1, ^uintptr(0)}) })
 	t.Run("float32", func(t *testing.T) {
 		roundTrip(t, []float32{0, 1, -1, 3.14, float32(math.Inf(1)), float32(math.Inf(-1))})
 	})
