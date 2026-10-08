@@ -452,7 +452,7 @@ func (d *Dict[K, V]) Clear() {
 // those times when you don't want to think very hard about when to Pack,
 // but still want your tombstones cleaned up at some point.
 func (d *Dict[K, V]) Del(k K) (found bool) {
-	if d.live == 0 {
+	if d == nil || d.live == 0 {
 		return false
 	}
 	h := d.hashOf(k)
@@ -497,7 +497,7 @@ func (d *Dict[K, V]) DelPackMaybe(k K) (found bool) {
 // tolerate skipping over some keys unknowingly. Use SlowWriteAll
 // instead of All here. See the All and SlowWriteAll docs for more.
 func (d *Dict[K, V]) Pack(force bool) {
-	if d.neverPack {
+	if d == nil || d.neverPack {
 		return
 	}
 	if d.live == len(d.entries) {
