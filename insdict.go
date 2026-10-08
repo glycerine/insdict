@@ -244,6 +244,29 @@ func (d *Dict[K, V]) Get2(k K) (v V, found bool) {
 	}
 }
 
+// On the linear congruential sequence above; llm audit reported:
+//
+// Summary of Correctness Verification
+//
+// The following core mechanisms were verified and found sound:
+//
+// Probe Sequence & Invariants: The CPython-style linear
+// congruential sequence (i*5 + perturb + 1) & mask visits
+// all slots. Load factor <= 2/3 guarantees at least 1/3 empty slots,
+// preventing infinite probe cycles.
+//
+// Tombstone Re-use: freeSlot reuses tagDummy slots only after
+// find has proven key absence. Reused slots never break
+// existing probe chains.
+//
+// SlowWriteAll: Nested iteration, early break, mid-loop
+// insertion/growth, and panics correctly preserve and
+// restore the neverPack flag via defer.
+//
+// Memory & GC Cleanliness: Unused slots in compacted entries
+// and deleted entries are explicitly cleared, leaving no
+// stale pointers in underlying arrays.
+
 // Occupied tags use the high bit to distinguish them from empty and dummy
 // slots. Use hash bits independent of the low bits selecting the initial slot.
 func hashTag(h uint64) byte { return tagUsed | byte(h>>57) }
