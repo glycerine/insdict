@@ -550,6 +550,10 @@ func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 //
 // Newly Put keys are guaranteed to be visible and will appear naturally
 // at the tail of the range after all prior keys; in insertion order.
+//
+// This means, for example, that if a loop Puts a new key during every
+// iteration, then it will never terminate on its own (it will run out of memory first);
+// each new key will be visited after the iteration that added it.
 func (d *Dict[K, V]) SlowWriteAll() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		if d == nil || len(d.entries) == 0 {
