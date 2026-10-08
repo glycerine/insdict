@@ -2,10 +2,125 @@ package insdict
 
 import (
 	"fmt"
+	"iter"
 	"math/rand"
 	"slices"
 	"testing"
 )
+
+func TestSlowWriteAllOverlappingPullIterators(t *testing.T) {
+	for _, first := range []int{0, 1} {
+		for _, exit := range []string{"stop", "exhaust"} {
+			for _, rebuild := range []string{"growth", "pack"} {
+				t.Run(fmt.Sprintf("first=%d/%s/%s", first, exit, rebuild), func(t *testing.T) {
+					d := NewDict[int, int]()
+					for k := 0; k < 5; k++ {
+						d.Put(k, k)
+					}
+					// Calls are serialized, but iterator lifetimes can overlap
+					// without ending in reverse order of their starts.
+					nextA, stopA := iter.Pull2(d.SlowWriteAll())
+					defer stopA()
+					nextB, stopB := iter.Pull2(d.SlowWriteAll())
+					defer stopB()
+					next := []func() (int, int, bool){nextA, nextB}
+					stop := []func(){stopA, stopB}
+					for i, advance := range next {
+						if k, v, ok := advance(); !ok || k != 0 || v != 0 {
+							t.Fatalf("iterator %d first yield = (%d, %d, %v)", i, k, v, ok)
+						}
+					}
+					if exit == "stop" {
+						stop[first]()
+					} else {
+						for k := 1; k < 5; k++ {
+							if got, v, ok := next[first](); !ok || got != k || v != k {
+								t.Fatalf("draining iterator: got (%d, %d, %v), want key %d", got, v, ok, k)
+							}
+						}
+						if _, _, ok := next[first](); ok {
+							t.Fatal("drained iterator did not terminate")
+						}
+					}
+
+					d.Del(0) // a hole before the surviving iterator's cursor
+					want := []int{1, 2, 3, 4}
+					if rebuild == "growth" {
+						d.Put(5, 5) // initial entry budget is full; forces a rebuild
+						want = append(want, 5)
+					} else {
+						d.Pack(true) // must remain a no-op while one iterator is active
+					}
+					var got []int
+					for {
+						k, v, ok := next[1-first]()
+						if !ok {
+							break
+						}
+						if v != k {
+							t.Errorf("key %d has value %d", k, v)
+						}
+						got = append(got, k)
+					}
+					if !slices.Equal(got, want) {
+						t.Errorf("surviving iterator yielded %v, want %v", got, want)
+					}
+					// Stopping completed iterators must not release protection twice.
+					stopA()
+					stopB()
+					d.Del(1)
+					d.Pack(true)
+					if len(d.entries) != d.Len() {
+						t.Error("Pack did not remove tombstones after both iterators completed")
+					}
+					checkInvariants(t, d)
+				})
+			}
+		}
+	}
+}
+
+func TestSlowWriteAllOverlappingClearAndClone(t *testing.T) {
+	for _, first := range []int{0, 1} {
+		t.Run(fmt.Sprintf("first=%d", first), func(t *testing.T) {
+			d := NewDict[int, int]()
+			for k := 0; k < 5; k++ {
+				d.Put(k, k)
+			}
+			nextA, stopA := iter.Pull2(d.SlowWriteAll())
+			defer stopA()
+			nextB, stopB := iter.Pull2(d.SlowWriteAll())
+			defer stopB()
+			nextA()
+			nextB()
+			d.Del(0)
+			clone := d.Clone()
+			clone.Pack(true)
+			if len(clone.entries) != clone.Len() {
+				t.Error("clone inherited the original's iterator protection")
+			}
+			if len(d.entries) != 5 {
+				t.Fatal("packing clone changed the original's entries")
+			}
+			d.Clear()
+			next := []func() (int, int, bool){nextA, nextB}
+			for _, i := range []int{first, 1 - first} {
+				if _, _, ok := next[i](); ok {
+					t.Fatalf("iterator %d continued after Clear", i)
+				}
+			}
+			// Reuse only after both iterations finish, as Clear's contract requires.
+			d.Put(10, 10)
+			d.Del(10)
+			d.Pack(true)
+			if len(d.entries) != 0 {
+				t.Error("Pack remained disabled after Clear and iterator shutdown")
+			}
+			checkInvariants(t, d)
+			checkInvariants(t, clone)
+		})
+	}
+}
 
 // The oracle is a map plus a queue of keys awaiting their turn. Deletion
 // removes a key from the queue; a fresh insertion appends it. It never reads
@@ -90,7 +205,7 @@ func TestSlowWriteAllRandomized(t *testing.T) {
 				if len(pending) != 0 {
 					t.Fatalf("iteration skipped keys: %v", pending)
 				}
-				if d.neverPack {
+				if d.activeWriteIters != 0 {
 					t.Fatal("packing remains disabled after iteration")
 				}
 				d.Pack(true)
@@ -175,7 +290,7 @@ func TestSlowWriteAllRestoresState(t *testing.T) {
 						}
 					}
 				}()
-				if !d.neverPack {
+				if d.activeWriteIters != 1 {
 					t.Fatal("nested iteration removed outer iterator's protection")
 				}
 				d.Del(0)
@@ -184,7 +299,7 @@ func TestSlowWriteAllRestoresState(t *testing.T) {
 			if !slices.Equal(got, []int{0, 1, 2, 3, 4, 5}) {
 				t.Fatalf("yielded %v, want [0 1 2 3 4 5]", got)
 			}
-			if d.neverPack {
+			if d.activeWriteIters != 0 {
 				t.Fatal("packing remains disabled after outer iteration")
 			}
 			checkInvariants(t, d)
@@ -212,7 +327,7 @@ func TestSlowWriteAllEarlyExit(t *testing.T) {
 				break
 			}
 		}()
-		if d.neverPack {
+		if d.activeWriteIters != 0 {
 			t.Fatal("packing remains disabled after early exit")
 		}
 		d.Pack(true)

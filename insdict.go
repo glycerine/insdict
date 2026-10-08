@@ -57,7 +57,7 @@ type Dict[K comparable, V any] struct {
 	tags    []byte // empty, dummy, or tagUsed | high 7 hash bits
 
 	// Active SlowWriteAll iterations preserve entry positions across rebuilds.
-	neverPack bool
+	activeWriteIters int
 }
 
 func NewDict[K comparable, V any]() *Dict[K, V] {
@@ -377,7 +377,7 @@ func (d *Dict[K, V]) Get2(k K) (v V, found bool) {
 //
 // SlowWriteAll: Nested iteration, early break, mid-loop
 // insertion/growth, and panics correctly preserve and
-// restore the neverPack flag via defer.
+// release their active iteration count via defer.
 //
 // Memory & GC Cleanliness: Unused slots in compacted entries
 // and deleted entries are explicitly cleared, leaving no
@@ -450,7 +450,7 @@ func (d *Dict[K, V]) rebuildEntries(size, capacity int) {
 	}
 	for i := range old {
 		if !old[i].live {
-			if d.neverPack {
+			if d.activeWriteIters != 0 {
 				// Preserve the position without indexing a deleted entry.
 				d.entries = append(d.entries, old[i])
 			}
@@ -513,7 +513,7 @@ func (d *Dict[K, V]) Put(k K, v V) (newlyAdded bool) {
 	// New key: rebuild when the table's entry budget is full (holes included).
 	if len(d.entries) >= d.usable() {
 		count := d.live
-		if d.neverPack {
+		if d.activeWriteIters != 0 {
 			// Retained tombstones consume the entry budget too.
 			count = len(d.entries)
 		}
@@ -549,6 +549,7 @@ func (d *Dict[K, V]) DeleteAll() {
 	d.live = 0
 	d.mask = 0
 	d.tags = nil
+	// Preserve activeWriteIters until the active iterations exit.
 }
 
 // Clear is the same as DeleteAll. It quickly deletes all elements
@@ -616,7 +617,7 @@ func (d *Dict[K, V]) DelPackMaybe(k K) (found bool) {
 // tolerate skipping over some keys unknowingly. Use SlowWriteAll
 // instead of All here. See the All and SlowWriteAll docs for more.
 func (d *Dict[K, V]) Pack(force bool) {
-	if d == nil || d.neverPack {
+	if d == nil || d.activeWriteIters != 0 {
 		return
 	}
 	if d.live == len(d.entries) {
@@ -719,7 +720,9 @@ func (d *Dict[K, V]) All() iter.Seq2[K, V] {
 // iteration, Pack is a no-op and reclaims no space, preserving
 // the accuracy of the iterator's position until the iteration completes.
 //
-// Nested SlowWriteAll iterations are supported.
+// Nested SlowWriteAll iterations and overlapping iter.Pull2 iterations are
+// supported, including when they finish in a different order than they began.
+// Access must still be serialized as described above.
 //
 // Clear and DeleteAll set the loop to terminate after the current
 // round finishes, since len(entries) drops to 0.
@@ -745,12 +748,11 @@ func (d *Dict[K, V]) SlowWriteAll() iter.Seq2[K, V] {
 		if d == nil || len(d.entries) == 0 {
 			return
 		}
-		// Restore the enclosing iterator's state, even on panic or Goexit.
-		// By not assuming previous was false, we support nested SlowWriteAll iteration.
-		previous := d.neverPack
-		d.neverPack = true
+		// Keep positions stable until every active iterator exits, regardless
+		// of exit order. The defer also releases protection on panic or Goexit.
+		d.activeWriteIters++
 		defer func() {
-			d.neverPack = previous
+			d.activeWriteIters--
 		}()
 		for i := 0; i < len(d.entries); i++ {
 			e := &d.entries[i]
@@ -784,7 +786,7 @@ func (d *Dict[K, V]) Clone() (r *Dict[K, V]) {
 		mask:    d.mask,
 		tags:    append([]byte(nil), d.tags...),
 
-		// deliberately omit neverPack. It should always start false.
+		// The clone has no active iterators; omit activeWriteIters.
 	}
 	return
 }
