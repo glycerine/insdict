@@ -491,7 +491,7 @@ func (d *Dict[K, V]) Pack(force bool) {
 // iterate one copy while modifying the other. Update: or use SlowWriteAll.
 //
 // Note that if you only need to Put (and not Del), then Pack(true)
-// once before All suffices to avoid accidentally skipped keys and the need to Clone.
+// once before All suffices to avoid skipped keys and the need to Clone.
 // Lacking tombstones, the underlying array can be grown during
 // iteration without changing any of the original index positions.
 func (d *Dict[K, V]) All() iter.Seq2[K, V] {
