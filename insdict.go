@@ -440,7 +440,8 @@ func (d *Dict[K, V]) DelPackMaybe(k K) (found bool) {
 // your iteration may miss keys after a Put grows the table and
 // shrinks the indexes of keys that had tombstones before them.
 // Do not do both Put and Del during All iteration unless you can
-// tolerate skipping over some keys unknowingly. See the All docs for more.
+// tolerate skipping over some keys unknowingly. Use SlowWriteAll
+// instead of All here. See the All and SlowWriteAll docs for more.
 func (d *Dict[K, V]) Pack(force bool) {
 	if d.neverPack {
 		return
