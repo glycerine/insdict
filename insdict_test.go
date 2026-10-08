@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"unsafe"
 )
 
 // ---------------------------------------------------------------------------
@@ -93,7 +94,7 @@ func checkInvariants[K comparable, V any](t testing.TB, d *Dict[K, V]) {
 		numericNaN := kind != nil && (kind.Kind() == reflect.Float32 || kind.Kind() == reflect.Float64 ||
 			kind.Kind() == reflect.Complex64 || kind.Kind() == reflect.Complex128)
 		if e.key == e.key || numericNaN {
-			if _, ix := d.find(e.key, e.hash, hashTag(e.hash)); int(ix) != i {
+			if _, ix := d.find(e.key, e.hash, hashTag(e.hash)); ix != i {
 				t.Fatalf("find(%v) returned ix=%d, want %d", e.key, ix, i)
 			}
 		} else if _, ix := d.find(e.key, e.hash, hashTag(e.hash)); ix != -1 {
@@ -119,7 +120,7 @@ func checkInvariants[K comparable, V any](t testing.TB, d *Dict[K, V]) {
 			}
 		case ix >= 0:
 			refs++
-			if int(ix) >= len(d.entries) || !d.entries[ix].live {
+			if ix >= len(d.entries) || !d.entries[ix].live {
 				t.Fatalf("slot %d points at bad/dead entry %d", slot, ix)
 			}
 			references[ix]++
@@ -526,6 +527,45 @@ func TestNewDictSizeNeverRebuilds(t *testing.T) {
 			t.Fatalf("n=%d: insert past hint failed", n)
 		}
 		checkInvariants(t, d)
+	}
+}
+
+// Run with checkptr on both 32-bit and 64-bit targets to catch control slices
+// extending past the allocation, in addition to checking the region boundary.
+func TestMetadataStorageLayout(t *testing.T) {
+	for _, size := range []int{8, 16, 64, 256} {
+		t.Run(fmt.Sprintf("size=%d", size), func(t *testing.T) {
+			d := NewDict[int, int]()
+			d.rebuild(size)
+			if len(d.indices) != size || cap(d.indices) != size ||
+				len(d.tags) != size || cap(d.tags) != size {
+				t.Fatal("metadata slices must each expose exactly size elements")
+			}
+			if unsafe.Sizeof(d.indices[0]) != unsafe.Sizeof(int(0)) {
+				t.Fatal("indexes must use the platform's int width")
+			}
+			endOfIndices := unsafe.Add(unsafe.Pointer(&d.indices[0]), uintptr(size)*unsafe.Sizeof(int(0)))
+			if unsafe.Pointer(&d.tags[0]) != endOfIndices {
+				t.Fatal("control bytes do not immediately follow the indexes")
+			}
+			for i := range d.tags {
+				d.tags[i] = byte(i)
+			}
+			for i, ix := range d.indices {
+				if ix != slotEmpty {
+					t.Fatalf("writing controls changed index %d to %d", i, ix)
+				}
+				d.indices[i] = i
+			}
+			for i, tag := range d.tags {
+				if tag != byte(i) {
+					t.Fatalf("writing indexes changed control %d to %d", i, tag)
+				}
+			}
+			// Reusing the allocation must reset both metadata regions.
+			d.rebuild(size)
+			checkInvariants(t, d)
+		})
 	}
 }
 

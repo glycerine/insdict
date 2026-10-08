@@ -11,12 +11,12 @@ import (
 )
 
 const (
-	slotEmpty int64 = -1
-	slotDummy int64 = -2
-	minSize         = 8 // must be a power of two and evenly divisible by 8.
-	tagEmpty  byte  = 0
-	tagDummy  byte  = 1
-	tagUsed   byte  = 0x80
+	slotEmpty int  = -1
+	slotDummy int  = -2
+	minSize        = 8 // must be a power of two and evenly divisible by 8.
+	tagEmpty  byte = 0
+	tagDummy  byte = 1
+	tagUsed   byte = 0x80
 )
 
 type entry[K comparable, V any] struct {
@@ -50,7 +50,7 @@ type entry[K comparable, V any] struct {
 // that do no Put/Set, no Del, no Pack, and no SlowWriteAll; only Get, Get2, Len, or All).
 type Dict[K comparable, V any] struct {
 	hash    func(K) uint64 // nil => defaultHash
-	indices []int64        // slotEmpty, slotDummy, or index into entries
+	indices []int          // slotEmpty, slotDummy, or index into entries
 	entries []entry[K, V]  // dense, insertion-ordered, may contain holes
 	live    int            // live entry count
 	mask    uint64
@@ -390,7 +390,7 @@ func hashTag(h uint64) byte { return tagUsed | byte(h>>57) }
 // find returns the indices slot and entries index for k, or ix == -1 and the
 // empty slot where the probe ended if k is absent. Requires d.indices != nil
 // and tag == hashTag(h). Passing the tag keeps this probe loop inlineable.
-func (d *Dict[K, V]) find(k K, h uint64, tag byte) (slot int, ix int64) {
+func (d *Dict[K, V]) find(k K, h uint64, tag byte) (slot, ix int) {
 	i, perturb := h&d.mask, h
 	for d.tags[i] != tagEmpty {
 		if d.tags[i] == tag {
@@ -431,10 +431,12 @@ func (d *Dict[K, V]) rebuildEntries(size, capacity int) {
 	if reuse {
 		clear(d.tags)
 	} else {
-		// Sizes are powers of two >= 8. Allocate the int64 indexes followed by
-		// exactly size control bytes in one pointer-free, aligned allocation.
+		// Sizes are powers of two >= 8, divisible by the int width (4 or 8 bytes).
+		// Allocate int indexes followed by exactly size control bytes in one
+		// pointer-free, aligned allocation.
 		// Limit the index slice's capacity so it cannot overlap the controls.
-		storage := make([]int64, size+size/8)
+		const indexBytes = int(unsafe.Sizeof(int(0)))
+		storage := make([]int, size+size/indexBytes)
 		d.indices = storage[:size:size]
 		d.tags = unsafe.Slice((*byte)(unsafe.Pointer(&storage[size])), size)
 	}
@@ -457,7 +459,7 @@ func (d *Dict[K, V]) rebuildEntries(size, capacity int) {
 			continue
 		}
 		slot := d.freeSlot(old[i].hash)
-		d.indices[slot] = int64(len(d.entries))
+		d.indices[slot] = len(d.entries)
 		d.tags[slot] = hashTag(old[i].hash)
 		d.entries = append(d.entries, old[i])
 	}
@@ -525,7 +527,7 @@ func (d *Dict[K, V]) Put(k K, v V) (newlyAdded bool) {
 		slot = int(d.freeSlot(h))
 	}
 
-	ix = int64(len(d.entries))
+	ix = len(d.entries)
 	d.entries = append(d.entries, entry[K, V]{hash: h, key: k, val: v, live: true})
 	d.indices[slot] = ix
 	d.tags[slot] = tag
@@ -780,7 +782,7 @@ func (d *Dict[K, V]) Clone() (r *Dict[K, V]) {
 	}
 	r = &Dict[K, V]{
 		hash:    d.hash,
-		indices: append([]int64(nil), d.indices...),
+		indices: append([]int(nil), d.indices...),
 		entries: append([]entry[K, V](nil), d.entries...),
 		live:    d.live,
 		mask:    d.mask,
