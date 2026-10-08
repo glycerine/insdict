@@ -3,6 +3,7 @@ package insdict
 import (
 	"fmt"
 	"iter"
+	"math"
 	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
@@ -93,16 +94,25 @@ func (d *Dict[K, V]) initSize(hint int) {
 func presizeFor(n int) int {
 	size := minSize
 	for size*2/3 < n {
+		if size <= 0 || size > (math.MaxInt>>1) {
+			panic("insdict: capacity hint exceeds maximum table size")
+		}
 		size <<= 1
 	}
 	return size
 }
 
-func (d *Dict[K, V]) hashOf(k K) uint64 {
+func (d *Dict[K, V]) hashOf(k K) (h uint64) {
 	if d.hash != nil {
-		return d.hash(k)
+		h = d.hash(k)
+	} else if iv, ok := any(k).(int); ok {
+		// Keep the common integer hash inline instead of dispatching through
+		// hashOf and the full defaultHash type switch on every lookup.
+		h = Mix64(uint64(iv))
+	} else {
+		h = defaultHash(k)
 	}
-	return defaultHash(k)
+	return
 }
 
 // Mix64 is the splitmix64 finalizer: a good, cheap integer mixer.
@@ -138,11 +148,18 @@ func defaultHash[K comparable](k K) uint64 {
 		return Mix64(uint64(v))
 	case uint64:
 		return Mix64(v)
+	case uintptr:
+		return Mix64(uint64(v))
 	case bool:
 		if v {
 			return Mix64(1)
 		}
 		return Mix64(0)
+	case nil:
+		// allows any/interface{} as key type. this is legal Go 1.20+;
+		// any is comparable at compile time. (You just get a runtime
+		// panic if the any ends up holding a non-comparable).
+		return 0
 	}
 	panic(fmt.Sprintf("insdict: no default hash for key type '%T'; use NewDictFunc", k))
 }
@@ -177,8 +194,15 @@ func EasyHashUint16(key uint16) uint64 { return Mix64(uint64(key)) }
 func EasyHashUint32(key uint32) uint64 { return Mix64(uint64(key)) }
 func EasyHashUint64(key uint64) uint64 { return Mix64(key) }
 
+func EasyHashUintptr(key uintptr) uint64 { return Mix64(uint64(key)) }
+
 // Len returns the number of live entries.
-func (d *Dict[K, V]) Len() int { return d.live }
+func (d *Dict[K, V]) Len() int {
+	if d == nil {
+		return 0
+	}
+	return d.live
+}
 
 // Get returns the value for k, or the zero value if absent.
 func (d *Dict[K, V]) Get(k K) (v V) {
@@ -188,16 +212,16 @@ func (d *Dict[K, V]) Get(k K) (v V) {
 
 // Get2 returns the value for k and whether it was present.
 func (d *Dict[K, V]) Get2(k K) (v V, found bool) {
-	if d.live == 0 {
+	if d == nil || d.live == 0 {
 		return
 	}
 	var h uint64
 	if d.hash != nil {
 		h = d.hash(k)
-	} else if v, ok := any(k).(int); ok {
+	} else if iv, ok := any(k).(int); ok {
 		// Keep the common integer hash inline instead of dispatching through
 		// hashOf and the full defaultHash type switch on every lookup.
-		h = Mix64(uint64(v))
+		h = Mix64(uint64(iv))
 	} else {
 		h = defaultHash(k)
 	}
@@ -305,10 +329,17 @@ func (d *Dict[K, V]) rebuildEntries(size, capacity int) {
 	}
 }
 
-// size such that live entries fill at most ~1/3 of usable capacity after rebuild
+// size such that live entries fill at most ~1/3 of total table slots,
+// which corresponds to ~1/2 of usable capacity (since usable capacity is 2/3 of total slots)
 func sizeFor(live int) int {
+	if live > (math.MaxInt-1)/3 {
+		panic("insdict: entry count exceeds maximum table capacity")
+	}
 	size := minSize
 	for size < live*3 {
+		if size <= 0 || size > (math.MaxInt>>1) {
+			panic("insdict: table size overflow")
+		}
 		size <<= 1
 	}
 	return size
@@ -326,8 +357,8 @@ func (d *Dict[K, V]) Put(k K, v V) (newlyAdded bool) {
 	var h uint64
 	if d.hash != nil {
 		h = d.hash(k)
-	} else if v, ok := any(k).(int); ok {
-		h = Mix64(uint64(v))
+	} else if iv, ok := any(k).(int); ok {
+		h = Mix64(uint64(iv))
 	} else {
 		h = defaultHash(k)
 	}
@@ -364,7 +395,7 @@ func (d *Dict[K, V]) Put(k K, v V) (newlyAdded bool) {
 	return true
 }
 
-// Set is the same as Put. Included for backward compatability.
+// Set is the same as Put. Included for backward compatibility.
 func (d *Dict[K, V]) Set(k K, v V) (newlyAdded bool) {
 	return d.Put(k, v)
 }
@@ -600,6 +631,9 @@ func (d *Dict[K, V]) SlowWriteAll() iter.Seq2[K, V] {
 //
 // The custom hash function (if any) and any state captured by it are also shared.
 func (d *Dict[K, V]) Clone() (r *Dict[K, V]) {
+	if d == nil {
+		return nil
+	}
 	r = &Dict[K, V]{
 		hash:    d.hash,
 		indices: append([]int64(nil), d.indices...),
