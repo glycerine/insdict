@@ -240,14 +240,18 @@ below the current key is supported; during Descend, keys at or above the current
 key may be deleted. Insertions, compaction, and clearing during either scan are
 not supported. 
 
-Benchmarks show we are pretty fast. 2x faster Put than an in-memory B-tree, 
-with about 2x slower scan time.
+Benchmarks show we are pretty fast. 2x faster Put than an in-memory B-tree.
+Full table read (scan) time is expensive the first time, of course, but
+is cheap if writes are infrequent compared to scans. It really depends on
+your usage pattern -- pick the container based on benchmarks of your
+application's typical behavior.
 
 | Operation (showing ns/key) |  insdict.Dict |BP-Tree | builtin Go map | tidwall/btree | red-black tree |
 | -------------------------- |  -----------: | -----: | -------------: | ------------: | -------------: |
 | Get                        |          25.5 |  115.2 |           19.6 |         133.1 |          232.6 |
 | Put                        |         150.1 |  201.9 |          168.6 |         316.6 |          635.6 |
-| Ordered scan               |          7.46 |   3.57 |  not supported |          4.84 |          18.05 |
+| Ordered scan (amortized)   |          7.46 |   3.57 |  not supported |          4.84 |          18.05 |
+| First ordered scan         |        303.54 |  10.12 |  not supported |          7.75 |          32.03 |
 
 ------------
 Copyright(C) 2026 Jason E. Aten, Ph.D.
