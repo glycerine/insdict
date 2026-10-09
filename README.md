@@ -7,6 +7,26 @@ Dict provides a hash table for Go that iterates in insert-order for deterministi
 In terms of performance, the common full table scans over All() are 5-20x faster than the built-in
 go map. Our point operations are tied or slightly faster than the built-in map. Benchmarks follow.
 
+# Sorted iteration
+
+`Ascend()` scans all keys in ascending order; `Ascend(lo)` starts at `lo`,
+and `Ascend(lo, hi)` scans `lo <= key < hi`. The sorted index is allocated
+on first iteration and rebuilt lazily after inserts, deletes, or compaction.
+Built-in ordered key types use typed comparators without reflection. NaNs sort last.
+You can supply `EasyCompare[K]` for named ordered types or a custom comparator:
+
+```go
+d := insdict.NewDictFunc[int, string](insdict.EasyHashInt, insdict.EasyCompare[int])
+d.Put(3, "three")
+for key, value := range d.Ascend(0, 10) {
+    fmt.Println(key, value)
+}
+```
+
+`NewDictFuncSize(hash, hint, compare)` also accepts the optional comparator.
+Ascend requires exclusive access. During iteration, `Del` of keys at or below
+the current key is supported; insertions, compaction, and clearing are not.
+
 # Why our Dict range All() scans are so much faster than Go's built-in map.
 
 Dict stores entries in one contiguous array, separate from its hash index.

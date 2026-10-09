@@ -250,3 +250,41 @@ func TestAscendTooManyPivots(t *testing.T) {
 	var d Dict[int, int]
 	d.Ascend(1, 2, 3)
 }
+
+func TestAscendTypedComparator(t *testing.T) {
+	type key int
+	d := NewDictFunc[key, int](func(k key) uint64 { return Mix64(uint64(k)) }, EasyCompare[key])
+	for _, k := range []key{4, -2, 1} {
+		d.Put(k, int(k))
+	}
+	if got := ascendKeys(d); !slices.Equal(got, []key{-2, 1, 4}) {
+		t.Fatal(got)
+	}
+	if got := ascendKeys(d.Clone(), 1, 4); !slices.Equal(got, []key{1}) {
+		t.Fatal(got)
+	}
+	type record struct{ ID int }
+	custom := NewDictFuncSize[record, int](func(k record) uint64 { return Mix64(uint64(k.ID)) }, 3, func(a, b record) int { return EasyCompare(a.ID, b.ID) })
+	custom.Put(record{3}, 3)
+	custom.Put(record{1}, 1)
+	if got := ascendKeys(custom, record{1}, record{3}); !slices.Equal(got, []record{{1}}) {
+		t.Fatal(got)
+	}
+	if EasyCompare(math.NaN(), math.Inf(1)) != 1 || EasyCompare(math.Inf(1), math.NaN()) != -1 || EasyCompare(math.NaN(), math.NaN()) != 0 {
+		t.Fatal("NaN ordering")
+	}
+}
+
+func BenchmarkAscendSortInt(b *testing.B) {
+	d := NewDictFuncSize[int, int](EasyHashInt, 1000, EasyCompare[int])
+	for i := 0; i < 1000; i++ {
+		d.Put((i*997)%1000, i)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		d.cleanSort = false
+		for range d.Ascend() {
+		}
+	}
+}

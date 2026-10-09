@@ -58,6 +58,7 @@ type entry[K comparable, V any] struct {
 // that do no Put/Set, no Del, no Pack, and no SlowWriteAll; only Get, Get2, Len, or All).
 type Dict[K comparable, V any] struct {
 	cleanSort bool
+	compare   func(K, K) int // nil => default ordering
 	sorted    *sortedIndex
 
 	hash    func(K) uint64 // nil => defaultHash
@@ -79,8 +80,18 @@ func NewDict[K comparable, V any]() *Dict[K, V] {
 // Equal keys must have identical hashes, including all NaN representations for
 // floating-point keys and all NaN-containing values of a given complex type.
 // The EasyHashFloat* and EasyHashComplex* helpers satisfy this rule.
-func NewDictFunc[K comparable, V any](hash func(K) uint64) *Dict[K, V] {
-	return &Dict[K, V]{hash: hash}
+// An optional comparator defines Ascend order: negative for a < b, zero for
+// equivalent keys, positive for a > b. It must define a consistent total order.
+// EasyCompare[K] provides natural ordering for ordered types, with NaNs last.
+func NewDictFunc[K comparable, V any](hash func(K) uint64, compare ...func(K, K) int) *Dict[K, V] {
+	if len(compare) > 1 {
+		panic("insdict: at most one comparator is allowed")
+	}
+	d := &Dict[K, V]{hash: hash}
+	if len(compare) == 1 {
+		d.compare = compare[0]
+	}
+	return d
 }
 
 // NewDictSize returns a Dict with room for hint entries, so inserting up to
@@ -94,9 +105,9 @@ func NewDictSize[K comparable, V any](hint int) *Dict[K, V] {
 }
 
 // NewDictFuncSize is NewDictFunc with a capacity hint. A nil hash selects the
-// default hash.
-func NewDictFuncSize[K comparable, V any](hash func(K) uint64, hint int) *Dict[K, V] {
-	d := &Dict[K, V]{hash: hash}
+// default hash. The optional comparator defines Ascend order, as in NewDictFunc.
+func NewDictFuncSize[K comparable, V any](hash func(K) uint64, hint int, compare ...func(K, K) int) *Dict[K, V] {
+	d := NewDictFunc[K, V](hash, compare...)
 	if hint > 0 {
 		d.initSize(hint)
 	}
@@ -650,13 +661,89 @@ func (d *Dict[K, V]) Pack(force bool) {
 	}
 }
 
+// EasyCompare compares ordered keys, placing NaNs after all other values.
+// It also supports named types and can be supplied to NewDictFunc or NewDictFuncSize.
+func EasyCompare[K cmp.Ordered](a, b K) int {
+	if a != a {
+		if b != b {
+			return 0
+		}
+		return 1
+	}
+	if b != b {
+		return -1
+	}
+	return cmp.Compare(a, b)
+}
+
+func defaultCompare[K comparable]() func(K, K) int {
+	var zero K
+	switch any(zero).(type) {
+	case string:
+		return any(EasyCompare[string]).(func(K, K) int)
+	case int:
+		return any(EasyCompare[int]).(func(K, K) int)
+	case int8:
+		return any(EasyCompare[int8]).(func(K, K) int)
+	case int16:
+		return any(EasyCompare[int16]).(func(K, K) int)
+	case int32:
+		return any(EasyCompare[int32]).(func(K, K) int)
+	case int64:
+		return any(EasyCompare[int64]).(func(K, K) int)
+	case uint:
+		return any(EasyCompare[uint]).(func(K, K) int)
+	case uint8:
+		return any(EasyCompare[uint8]).(func(K, K) int)
+	case uint16:
+		return any(EasyCompare[uint16]).(func(K, K) int)
+	case uint32:
+		return any(EasyCompare[uint32]).(func(K, K) int)
+	case uint64:
+		return any(EasyCompare[uint64]).(func(K, K) int)
+	case uintptr:
+		return any(EasyCompare[uintptr]).(func(K, K) int)
+	case float32:
+		return any(EasyCompare[float32]).(func(K, K) int)
+	case float64:
+		return any(EasyCompare[float64]).(func(K, K) int)
+	}
+	// Named ordered types retain a reflection fallback unless a comparator is supplied.
+	var compare func(K, K) int
+	switch reflect.TypeFor[K]().Kind() {
+	case reflect.String:
+		compare = func(a, b K) int { return strings.Compare(reflect.ValueOf(a).String(), reflect.ValueOf(b).String()) }
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		compare = func(a, b K) int { return cmp.Compare(reflect.ValueOf(a).Int(), reflect.ValueOf(b).Int()) }
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		compare = func(a, b K) int { return cmp.Compare(reflect.ValueOf(a).Uint(), reflect.ValueOf(b).Uint()) }
+	case reflect.Float32, reflect.Float64:
+		compare = func(a, b K) int {
+			x, y := reflect.ValueOf(a).Float(), reflect.ValueOf(b).Float()
+			if math.IsNaN(x) {
+				if math.IsNaN(y) {
+					return 0
+				}
+				return 1
+			}
+			if math.IsNaN(y) {
+				return -1
+			}
+			return cmp.Compare(x, y)
+		}
+	default:
+		panic("insdict: Ascend requires string, integer, or floating-point keys")
+	}
+	return compare
+}
+
 // Ascend returns an iterator over live entries in ascending key order.
 // With no pivots it visits all keys; with one it visits keys >= piv[0];
 // with two it visits piv[0] <= key < piv[1]. More than two pivots panic.
 // Pivots need not be present. Equal or reversed bounds yield no entries.
 // A range break stops iteration.
-// Keys must be strings, integers, or floats (including named types); other
-// key types panic. NaNs sort after all other floating-point keys.
+// By default keys must be strings, integers, or floats (including named types);
+// other key types require a custom comparator. NaNs sort last by default.
 // A nil receiver is empty.
 //
 // The sorted index is allocated lazily and reused until keys or entry positions
@@ -686,31 +773,10 @@ func (d *Dict[K, V]) Ascend(piv ...K) iter.Seq2[K, V] {
 		if d.sorted == nil {
 			d.sorted = &sortedIndex{}
 		}
-		// Choose the comparator once per iteration, for sorting and pivot search.
-		var compare func(K, K) int
-		switch reflect.TypeFor[K]().Kind() {
-		case reflect.String:
-			compare = func(a, b K) int { return strings.Compare(reflect.ValueOf(a).String(), reflect.ValueOf(b).String()) }
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			compare = func(a, b K) int { return cmp.Compare(reflect.ValueOf(a).Int(), reflect.ValueOf(b).Int()) }
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-			compare = func(a, b K) int { return cmp.Compare(reflect.ValueOf(a).Uint(), reflect.ValueOf(b).Uint()) }
-		case reflect.Float32, reflect.Float64:
-			compare = func(a, b K) int {
-				x, y := reflect.ValueOf(a).Float(), reflect.ValueOf(b).Float()
-				if math.IsNaN(x) {
-					if math.IsNaN(y) {
-						return 0
-					}
-					return 1
-				}
-				if math.IsNaN(y) {
-					return -1
-				}
-				return cmp.Compare(x, y)
-			}
-		default:
-			panic("insdict: Ascend requires string, integer, or floating-point keys")
+		compare := d.compare
+		if compare == nil {
+			compare = defaultCompare[K]()
+			d.compare = compare
 		}
 		if !d.cleanSort {
 			idx := d.sorted.sidx[:0]
@@ -899,6 +965,7 @@ func (d *Dict[K, V]) Clone() (r *Dict[K, V]) {
 	}
 	r = &Dict[K, V]{
 		hash:    d.hash,
+		compare: d.compare,
 		indices: append([]int(nil), d.indices...),
 		entries: append([]entry[K, V](nil), d.entries...),
 		live:    d.live,
