@@ -241,10 +241,9 @@ key may be deleted. Insertions, compaction, and clearing during either scan are
 not supported. 
 
 Benchmarks show we are pretty fast. 2x faster Put than an in-memory B-tree.
-Full table read (scan) time is expensive the first time, of course, but
-is cheap if writes are infrequent compared to scans. It really depends on
-your usage pattern -- pick the container based on benchmarks of your
-application's typical behavior.
+Sorted-order full table read (scan) time is expensive the first time, of course, but
+is cheap if writes are infrequent compared to scans: the first sort basically costs
+the same (303.54 ns/key) as inserting into a B-tree the first time (316.6 ns/key). 
 
 | Operation (showing ns/key) |  insdict.Dict |BP-Tree | builtin Go map | tidwall/btree | red-black tree |
 | -------------------------- |  -----------: | -----: | -------------: | ------------: | -------------: |
