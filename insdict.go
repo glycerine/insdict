@@ -1,10 +1,13 @@
 package insdict
 
 import (
+	"cmp"
 	"fmt"
 	"iter"
 	"math"
 	"reflect"
+	"slices"
+	"strings"
 	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
@@ -18,6 +21,10 @@ const (
 	tagDummy  byte = 1
 	tagUsed   byte = 0x80
 )
+
+type sortedIndex struct {
+	sidx []int
+}
 
 type entry[K comparable, V any] struct {
 	hash uint64
@@ -45,10 +52,14 @@ type entry[K comparable, V any] struct {
 //
 // Just like the built-in Go map, we are not safe for concurrent use by default,
 // and require external synchronization when a writer can race with readers.
-// Readers do not modify the data structure and so do not race with each other.
+// Ascend may modify its sorted cache and requires exclusive access.
+// Other readers do not modify the data structure and so do not race with each other.
 // Any number of read-only goroutines can access a Dict concurrently (those
 // that do no Put/Set, no Del, no Pack, and no SlowWriteAll; only Get, Get2, Len, or All).
 type Dict[K comparable, V any] struct {
+	cleanSort bool
+	sorted    *sortedIndex
+
 	hash    func(K) uint64 // nil => defaultHash
 	indices []int          // slotEmpty, slotDummy, or index into entries
 	entries []entry[K, V]  // dense, insertion-ordered, may contain holes
@@ -426,6 +437,7 @@ func (d *Dict[K, V]) rebuild(size int) {
 }
 
 func (d *Dict[K, V]) rebuildEntries(size, capacity int) {
+	d.cleanSort = false
 	old := d.entries
 	reuse := size == len(d.indices)
 	if reuse {
@@ -532,6 +544,7 @@ func (d *Dict[K, V]) Put(k K, v V) (newlyAdded bool) {
 	d.indices[slot] = ix
 	d.tags[slot] = tag
 	d.live++
+	d.cleanSort = false
 
 	return true
 }
@@ -546,6 +559,8 @@ func (d *Dict[K, V]) DeleteAll() {
 	if d == nil {
 		return
 	}
+	d.cleanSort = false
+	d.sorted = nil
 	d.indices = nil
 	d.entries = nil
 	d.live = 0
@@ -588,6 +603,7 @@ func (d *Dict[K, V]) Del(k K) (found bool) {
 	d.tags[slot] = tagDummy
 	d.entries[ix] = entry[K, V]{} // zero it so the GC can release K and V
 	d.live--
+	d.cleanSort = false
 
 	return true
 }
@@ -631,6 +647,107 @@ func (d *Dict[K, V]) Pack(force bool) {
 	}
 	if force {
 		d.rebuild(sizeFor(d.live))
+	}
+}
+
+// Ascend returns an iterator over live entries in ascending key order.
+// With no pivots it visits all keys; with one it visits keys >= piv[0];
+// with two it visits piv[0] <= key < piv[1]. More than two pivots panic.
+// Pivots need not be present. Equal or reversed bounds yield no entries.
+// A range break stops iteration.
+// Keys must be strings, integers, or floats (including named types); other
+// key types panic. NaNs sort after all other floating-point keys.
+// A nil receiver is empty.
+//
+// The sorted index is allocated lazily and reused until keys or entry positions
+// change. Value updates do not require sorting again. Ascend requires exclusive
+// access because it may update the cache, even when the loop body only reads.
+//
+// The loop body may call Del on keys <= the current key without changing the
+// active index. Inserting keys, packing, clearing, or calling Ascend recursively
+// after deletion during a scan is not supported.
+func (d *Dict[K, V]) Ascend(piv ...K) iter.Seq2[K, V] {
+	if len(piv) > 2 {
+		panic("insdict: Ascend accepts at most two pivots")
+	}
+	// Copy bounds so a caller changing a variadic slice cannot change the iterator.
+	n := len(piv)
+	var lower, upper K
+	if n > 0 {
+		lower = piv[0]
+	}
+	if n > 1 {
+		upper = piv[1]
+	}
+	return func(yield func(K, V) bool) {
+		if d == nil {
+			return
+		}
+		if d.sorted == nil {
+			d.sorted = &sortedIndex{}
+		}
+		// Choose the comparator once per iteration, for sorting and pivot search.
+		var compare func(K, K) int
+		switch reflect.TypeFor[K]().Kind() {
+		case reflect.String:
+			compare = func(a, b K) int { return strings.Compare(reflect.ValueOf(a).String(), reflect.ValueOf(b).String()) }
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			compare = func(a, b K) int { return cmp.Compare(reflect.ValueOf(a).Int(), reflect.ValueOf(b).Int()) }
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			compare = func(a, b K) int { return cmp.Compare(reflect.ValueOf(a).Uint(), reflect.ValueOf(b).Uint()) }
+		case reflect.Float32, reflect.Float64:
+			compare = func(a, b K) int {
+				x, y := reflect.ValueOf(a).Float(), reflect.ValueOf(b).Float()
+				if math.IsNaN(x) {
+					if math.IsNaN(y) {
+						return 0
+					}
+					return 1
+				}
+				if math.IsNaN(y) {
+					return -1
+				}
+				return cmp.Compare(x, y)
+			}
+		default:
+			panic("insdict: Ascend requires string, integer, or floating-point keys")
+		}
+		if !d.cleanSort {
+			idx := d.sorted.sidx[:0]
+			if cap(idx) < d.live {
+				idx = make([]int, 0, d.live)
+			}
+			for i := range d.entries {
+				if d.entries[i].live {
+					idx = append(idx, i)
+				}
+			}
+			d.sorted.sidx = idx
+			slices.SortFunc(idx, func(a, b int) int { return compare(d.entries[a].key, d.entries[b].key) })
+			d.cleanSort = true
+		}
+		start, end := 0, len(d.sorted.sidx)
+		search := func(key K) int {
+			i, _ := slices.BinarySearchFunc(d.sorted.sidx, key, func(i int, key K) int {
+				return compare(d.entries[i].key, key)
+			})
+			return i
+		}
+		if n > 0 {
+			start = search(lower)
+		}
+		if n > 1 {
+			end = search(upper)
+		}
+		if start >= end {
+			return
+		}
+		for _, i := range d.sorted.sidx[start:end] {
+			e := &d.entries[i]
+			if !yield(e.key, e.val) {
+				return
+			}
+		}
 	}
 }
 
