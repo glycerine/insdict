@@ -53,7 +53,7 @@ type entry[K comparable, V any] struct {
 //
 // Just like the built-in Go map, we are not safe for concurrent use by default,
 // and require external synchronization when a writer can race with readers.
-// Ascend and Descend may modify their sorted cache and require exclusive access.
+// Sort, Ascend, and Descend may modify their sorted cache and require exclusive access.
 // Other readers do not modify the data structure and so do not race with each other.
 // Any number of read-only goroutines can access a Dict concurrently (those
 // that do no Put/Set, no Del, no Pack, and no SlowWriteAll; only Get, Get2, Len, or All).
@@ -736,6 +736,24 @@ func defaultCompare[K comparable]() func(K, K) int {
 		panic("insdict: Ascend requires string, integer, or floating-point keys")
 	}
 	return compare
+}
+
+// Sort controls the cached sorted index. Sort(true) materializes the index
+// and brings it up to date if dirty. Sort(false) releases the index and marks
+// it dirty; a later Sort(true), Ascend, or Descend rebuilds it on demand.
+// Sort does not change insertion order. It requires exclusive access and must
+// not be called during a sorted iteration. A nil receiver is a no-op.
+// Sort(true) requires the same key ordering or custom comparator as Ascend.
+func (d *Dict[K, V]) Sort(on bool) {
+	if d == nil {
+		return
+	}
+	if on {
+		d.prepareSorted()
+	} else {
+		d.sorted = nil
+		d.cleanSort = false
+	}
 }
 
 // prepareSorted materializes the shared ascending index only when needed.
