@@ -240,6 +240,14 @@ below the current key is supported; during Descend, keys at or above the current
 key may be deleted. Insertions, compaction, and clearing during either scan are
 not supported. 
 
+Benchmarks show we are pretty fast. 2x faster Put than an in-memory B-tree, 
+with about 2x slower scan time.
+
+| Operation (showing ns/key) |  insdict.Dict |BP-Tree | builtin Go map | tidwall/btree | red-black tree |
+| -------------------------- |  -----------: | -----: | -------------: | ------------: | -------------: |
+| Get                        |          25.5 |  115.2 |           19.6 |         133.1 |          232.6 |
+| Put                        |         150.1 |  201.9 |          168.6 |         316.6 |          635.6 |
+| Ordered scan               |          7.46 |   3.57 |  not supported |          4.84 |          18.05 |
 
 ------------
 Copyright(C) 2026 Jason E. Aten, Ph.D.
