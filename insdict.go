@@ -823,13 +823,12 @@ func (d *Dict[K, V]) Ascend(piv ...K) iter.Seq2[K, V] {
 		}
 		compare := d.prepareSorted()
 
-		// off to measure impact in benchmarks
 		// Keep positions stable until every active iterator exits, regardless
 		// of exit order. The defer also releases protection on panic or Goexit.
-		//d.activeWriteIters++
-		//defer func() {
-		//	d.activeWriteIters--
-		//}()
+		d.activeWriteIters++
+		defer func() {
+			d.activeWriteIters--
+		}()
 
 		start, end := 0, len(d.sorted.sidx)
 		search := func(key K) int {
@@ -888,13 +887,12 @@ func (d *Dict[K, V]) Descend(piv ...K) iter.Seq2[K, V] {
 		}
 		compare := d.prepareSorted()
 
-		// off to measure impact in benchmarks
 		// Keep positions stable until every active iterator exits, regardless
 		// of exit order. The defer also releases protection on panic or Goexit.
-		//d.activeWriteIters++
-		//defer func() {
-		//	d.activeWriteIters--
-		//}()
+		d.activeWriteIters++
+		defer func() {
+			d.activeWriteIters--
+		}()
 
 		idx := d.sorted.sidx
 		// Upper bounds include every key equivalent to the pivot under compare.
