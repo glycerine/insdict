@@ -804,6 +804,14 @@ func (d *Dict[K, V]) Ascend(piv ...K) iter.Seq2[K, V] {
 			return
 		}
 		compare := d.prepareSorted()
+
+		// Keep positions stable until every active iterator exits, regardless
+		// of exit order. The defer also releases protection on panic or Goexit.
+		d.activeWriteIters++
+		defer func() {
+			d.activeWriteIters--
+		}()
+
 		start, end := 0, len(d.sorted.sidx)
 		search := func(key K) int {
 			i, _ := slices.BinarySearchFunc(d.sorted.sidx, key, func(i int, key K) int {
@@ -860,6 +868,14 @@ func (d *Dict[K, V]) Descend(piv ...K) iter.Seq2[K, V] {
 			return
 		}
 		compare := d.prepareSorted()
+
+		// Keep positions stable until every active iterator exits, regardless
+		// of exit order. The defer also releases protection on panic or Goexit.
+		d.activeWriteIters++
+		defer func() {
+			d.activeWriteIters--
+		}()
+
 		idx := d.sorted.sidx
 		// Upper bounds include every key equivalent to the pivot under compare.
 		search := func(key K) int {
