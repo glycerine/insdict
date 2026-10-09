@@ -245,12 +245,21 @@ Sorted-order full table read (scan) time is expensive the first time, of course,
 is cheap if writes are infrequent compared to scans: the first sort basically costs
 the same (303.54 ns/key) as inserting into a B-tree the first time (316.6 ns/key). 
 
-| Operation (showing ns/key) |  insdict.Dict |BP-Tree | builtin Go map | tidwall/btree | red-black tree |
-| -------------------------- |  -----------: | -----: | -------------: | ------------: | -------------: |
-| Get                        |          25.5 |  115.2 |           19.6 |         133.1 |          232.6 |
-| Put                        |         150.1 |  201.9 |          168.6 |         316.6 |          635.6 |
-| Ordered scan (amortized)   |          7.46 |   3.57 |  not supported |          4.84 |          18.05 |
-| First ordered scan         |        303.54 |  10.12 |  not supported |          7.75 |          32.03 |
+| Operation (showing ns/key) |  insdict[1]  |BP-Tree[2] | builtin Go map | tidwall/btree[3] | red-black tree[4] |
+| -------------------------- |  -------: | -----: | -------------: | ------------: | -------------: |
+| Get                        |      25.5 |  115.2 |           19.6 |         133.1 |          232.6 |
+| Put                        |     150.1 |  201.9 |          168.6 |         316.6 |          635.6 |
+| Ordered scan (amortized)   |      7.46 |   3.57 |  not supported |          4.84 |          18.05 |
+| First ordered scan         |    303.54 |  10.12 |  not supported |          7.75 |          32.03 |
+
+[1] this package; https://github.com/glycerine/insdict
+
+[2] https://github.com/glycerine/bufftree
+
+[3] https://github.com/tidwall/btree
+
+[4] https://github.com/glycerine/rbtree
+
 
 ------------
 Copyright(C) 2026 Jason E. Aten, Ph.D.
