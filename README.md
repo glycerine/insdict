@@ -10,7 +10,10 @@ go map. Our point operations are tied or slightly faster than the built-in map. 
 # Sorted iteration
 
 `Ascend()` scans all keys in ascending order; `Ascend(lo)` starts at `lo`,
-and `Ascend(lo, hi)` scans `lo <= key < hi`. The sorted index is allocated
+and `Ascend(lo, hi)` scans `lo <= key < hi`.
+`Descend()` scans all keys in descending order; `Descend(hi)` visits keys
+`<= hi`, and `Descend(hi, lo)` scans `hi >= key > lo`. Both share the same
+sorted index, which is allocated
 on first iteration and rebuilt lazily after inserts, deletes, or compaction.
 Built-in ordered key types use typed comparators without reflection. NaNs sort last.
 You can supply `EasyCompare[K]` for named ordered types or a custom comparator:
@@ -24,8 +27,10 @@ for key, value := range d.Ascend(0, 10) {
 ```
 
 `NewDictFuncSize(hash, hint, compare)` also accepts the optional comparator.
-Ascend requires exclusive access. During iteration, `Del` of keys at or below
-the current key is supported; insertions, compaction, and clearing are not.
+Ascend and Descend require exclusive access. During Ascend, `Del` of keys at or
+below the current key is supported; during Descend, keys at or above the current
+key may be deleted. Insertions, compaction, and clearing during either scan are
+not supported. NaNs appear first in Descend, reversing their Ascend order.
 
 # Why our Dict range All() scans are so much faster than Go's built-in map.
 

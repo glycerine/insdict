@@ -7,6 +7,7 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"unsafe"
 
@@ -52,7 +53,7 @@ type entry[K comparable, V any] struct {
 //
 // Just like the built-in Go map, we are not safe for concurrent use by default,
 // and require external synchronization when a writer can race with readers.
-// Ascend may modify its sorted cache and requires exclusive access.
+// Ascend and Descend may modify their sorted cache and require exclusive access.
 // Other readers do not modify the data structure and so do not race with each other.
 // Any number of read-only goroutines can access a Dict concurrently (those
 // that do no Put/Set, no Del, no Pack, and no SlowWriteAll; only Get, Get2, Len, or All).
@@ -737,6 +738,35 @@ func defaultCompare[K comparable]() func(K, K) int {
 	return compare
 }
 
+// prepareSorted materializes the shared ascending index only when needed.
+func (d *Dict[K, V]) prepareSorted() func(K, K) int {
+	if d.sorted == nil {
+		d.sorted = &sortedIndex{}
+		d.cleanSort = false
+	}
+	compare := d.compare
+	if compare == nil {
+		compare = defaultCompare[K]()
+		d.compare = compare
+	}
+	if !d.cleanSort {
+		idx := d.sorted.sidx[:0]
+		if cap(idx) < d.live {
+			idx = make([]int, 0, d.live)
+		}
+		for i := range d.entries {
+			if d.entries[i].live {
+				idx = append(idx, i)
+			}
+		}
+		d.sorted.sidx = idx
+		slices.SortFunc(idx, func(a, b int) int { return compare(d.entries[a].key, d.entries[b].key) })
+		d.cleanSort = true
+	}
+
+	return compare
+}
+
 // Ascend returns an iterator over live entries in ascending key order.
 // With no pivots it visits all keys; with one it visits keys >= piv[0];
 // with two it visits piv[0] <= key < piv[1]. More than two pivots panic.
@@ -750,8 +780,11 @@ func defaultCompare[K comparable]() func(K, K) int {
 // change. Value updates do not require sorting again. Ascend requires exclusive
 // access because it may update the cache, even when the loop body only reads.
 //
+// PRE: the user must guarantee exclusive access to the Dict before
+// Ascend starts, and that exclusion must continue until it finishes.
+//
 // The loop body may call Del on keys <= the current key without changing the
-// active index. Inserting keys, packing, clearing, or calling Ascend recursively
+// active index. Inserting keys, packing, clearing, or starting another sorted iteration
 // after deletion during a scan is not supported.
 func (d *Dict[K, V]) Ascend(piv ...K) iter.Seq2[K, V] {
 	if len(piv) > 2 {
@@ -770,28 +803,7 @@ func (d *Dict[K, V]) Ascend(piv ...K) iter.Seq2[K, V] {
 		if d == nil {
 			return
 		}
-		if d.sorted == nil {
-			d.sorted = &sortedIndex{}
-		}
-		compare := d.compare
-		if compare == nil {
-			compare = defaultCompare[K]()
-			d.compare = compare
-		}
-		if !d.cleanSort {
-			idx := d.sorted.sidx[:0]
-			if cap(idx) < d.live {
-				idx = make([]int, 0, d.live)
-			}
-			for i := range d.entries {
-				if d.entries[i].live {
-					idx = append(idx, i)
-				}
-			}
-			d.sorted.sidx = idx
-			slices.SortFunc(idx, func(a, b int) int { return compare(d.entries[a].key, d.entries[b].key) })
-			d.cleanSort = true
-		}
+		compare := d.prepareSorted()
 		start, end := 0, len(d.sorted.sidx)
 		search := func(key K) int {
 			i, _ := slices.BinarySearchFunc(d.sorted.sidx, key, func(i int, key K) int {
@@ -810,6 +822,58 @@ func (d *Dict[K, V]) Ascend(piv ...K) iter.Seq2[K, V] {
 		}
 		for _, i := range d.sorted.sidx[start:end] {
 			e := &d.entries[i]
+			if !yield(e.key, e.val) {
+				return
+			}
+		}
+	}
+}
+
+// Descend returns an iterator over live entries in descending key order.
+// With no pivots it visits all keys; with one it visits keys <= piv[0];
+// with two it visits piv[0] >= key > piv[1]. More than two pivots panic.
+// Pivots need not be present. Equal or reversed bounds yield no entries.
+// Ordering follows Ascend's comparator in reverse, so NaNs come first by default.
+// A nil receiver is empty. A range break stops iteration.
+//
+// Descend shares Ascend's lazy sorted index and requires exclusive access.
+// The loop body may call Del on keys >= the current key without changing the
+// active index. Inserting keys, packing, clearing, or starting another sorted
+// iteration after deletion during a scan is not supported.
+//
+// PRE: the user must guarantee exclusive access to the Dict before
+// Descend starts, and that exclusion must continue until it finishes.
+func (d *Dict[K, V]) Descend(piv ...K) iter.Seq2[K, V] {
+	if len(piv) > 2 {
+		panic("insdict: Descend accepts at most two pivots")
+	}
+	n := len(piv)
+	var upper, lower K
+	if n > 0 {
+		upper = piv[0]
+	}
+	if n > 1 {
+		lower = piv[1]
+	}
+	return func(yield func(K, V) bool) {
+		if d == nil {
+			return
+		}
+		compare := d.prepareSorted()
+		idx := d.sorted.sidx
+		// Upper bounds include every key equivalent to the pivot under compare.
+		search := func(key K) int {
+			return sort.Search(len(idx), func(i int) bool { return compare(d.entries[idx[i]].key, key) > 0 })
+		}
+		start, end := len(idx), 0
+		if n > 0 {
+			start = search(upper)
+		}
+		if n > 1 {
+			end = search(lower)
+		}
+		for j := start - 1; j >= end; j-- {
+			e := &d.entries[idx[j]]
 			if !yield(e.key, e.val) {
 				return
 			}
