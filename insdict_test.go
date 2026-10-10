@@ -129,16 +129,36 @@ func checkInvariants[K comparable, V any](t testing.TB, d *Dict[K, V]) {
 			h := d.entries[ix].hash
 			probe, perturb := h&d.mask, h
 			reachable := false
-			for step := 0; step < size+13; step++ {
-				if int(probe) == slot {
-					reachable = true
-					break
+			if groupedProbing {
+				base := probe &^ uint64(groupWidth-1)
+				var stride uint64
+				for step := 0; step < size/groupWidth; step++ {
+					if slot/groupWidth == int(base)/groupWidth {
+						reachable = true
+						break
+					}
+					hasEmpty := false
+					for offset := 0; offset < groupWidth; offset++ {
+						hasEmpty = hasEmpty || d.tags[int(base)+offset] == tagEmpty
+					}
+					if hasEmpty {
+						break
+					}
+					stride += groupWidth
+					base = (base + stride) & d.mask
 				}
-				if d.tags[probe] == tagEmpty {
-					break
+			} else {
+				for step := 0; step < size+13; step++ {
+					if int(probe) == slot {
+						reachable = true
+						break
+					}
+					if d.tags[probe] == tagEmpty {
+						break
+					}
+					perturb >>= 5
+					probe = (probe*5 + perturb + 1) & d.mask
 				}
-				perturb >>= 5
-				probe = (probe*5 + perturb + 1) & d.mask
 			}
 			if !reachable {
 				t.Fatalf("slot %d is unreachable on entry %d's probe path", slot, ix)
@@ -534,6 +554,9 @@ func TestNewDictSizeNeverRebuilds(t *testing.T) {
 // extending past the allocation, in addition to checking the region boundary.
 func TestMetadataStorageLayout(t *testing.T) {
 	for _, size := range []int{8, 16, 64, 256} {
+		if size < minSize {
+			continue
+		}
 		t.Run(fmt.Sprintf("size=%d", size), func(t *testing.T) {
 			d := NewDict[int, int]()
 			d.rebuild(size)

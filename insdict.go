@@ -17,7 +17,6 @@ import (
 const (
 	slotEmpty int  = -1
 	slotDummy int  = -2
-	minSize        = 8 // must be a power of two and evenly divisible by 8.
 	tagEmpty  byte = 0
 	tagDummy  byte = 1
 	tagUsed   byte = 0x80
@@ -365,6 +364,13 @@ func (d *Dict[K, V]) Get2(k K) (v V, found bool) {
 		h = defaultHash(k)
 	}
 	tag := hashTag(h)
+	if groupedProbing {
+		_, ix := d.findGrouped(k, h, tag)
+		if ix >= 0 {
+			return d.entries[ix].val, true
+		}
+		return
+	}
 	i, perturb := h&d.mask, h
 	for {
 		// Check compact metadata first: most misses never read either array.
@@ -414,6 +420,9 @@ func hashTag(h uint64) byte { return tagUsed | byte(h>>57) }
 // empty slot where the probe ended if k is absent. Requires d.indices != nil
 // and tag == hashTag(h). Passing the tag keeps this probe loop inlineable.
 func (d *Dict[K, V]) find(k K, h uint64, tag byte) (slot, ix int) {
+	if groupedProbing {
+		return d.findGrouped(k, h, tag)
+	}
 	i, perturb := h&d.mask, h
 	for d.tags[i] != tagEmpty {
 		if d.tags[i] == tag {
@@ -434,6 +443,9 @@ func (d *Dict[K, V]) usable() int { return len(d.indices) * 2 / 3 }
 
 // first empty-or-dummy slot on h's probe path (only call when the key is known absent)
 func (d *Dict[K, V]) freeSlot(h uint64) uint64 {
+	if groupedProbing {
+		return d.freeSlotGrouped(h)
+	}
 	i, perturb := h&d.mask, h
 	for d.tags[i] >= tagUsed {
 		perturb >>= 5

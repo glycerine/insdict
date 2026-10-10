@@ -35,6 +35,69 @@ matched benchmarks. The
 [Go runtime's iteration discussion](https://github.com/golang/go/blob/go1.26.4/src/internal/runtime/maps/map.go#L134-L175)
 explains its more demanding mutation semantics.
 
+# Experimental SIMD probing
+
+Build with `-tags insdict_simd` to try 16-slot grouped probing. On amd64,
+SSE2 compares all 16 control bytes at once; this works on Darwin and Linux
+without cgo or CPU feature detection. Other architectures, including arm64,
+use portable 64-bit word operations (SWAR). This prototype does not yet use
+ARM NEON. `-tags 'insdict_simd,insdict_swar'` forces the portable matcher on
+amd64 without changing the hash implementation; `purego` also disables assembly.
+The default build keeps the original single-slot perturb probe sequence.
+
+SIMD needs a change to probing as well as a byte-comparison instruction:
+the original probes jump between unrelated slots. The experiment searches
+aligned groups of 16 and advances between groups using triangular offsets.
+Every matching fingerprint in a group is checked before an empty slot ends
+the search. Deleted slots remain tombstones, and insertions reuse them only
+after proving the key absent. Entries retain the same insertion-ordered storage
+and the load limit remains 2/3. The minimum index table grows from 8 to 16 slots;
+larger tables still use one control byte and one int index per slot.
+
+The built-in Go map has also used Swiss tables since Go 1.24; see
+[the Go team's explanation](https://go.dev/blog/swisstable).
+Faster metadata matching does not guarantee faster dictionary operations:
+assembly calls cannot inline, groups test more fingerprints, and large-table
+lookups still depend on accesses to the index and entry arrays. Scanning `All()`
+does not consult the control bytes and gains nothing from SIMD probing.
+
+To compare the existing implementation, grouped SSE2, and grouped SWAR:
+
+```sh
+bench='^BenchmarkPointGet(Int|String)$/^n=(1024|16384|1048576)$/^grown$/^(hit|miss|mixed)$/^(Dict|Map)$|^BenchmarkGroupMasks$|^BenchmarkDictPut(Presized|Overwrite)?$/^n=(1000|1000000)$|^BenchmarkPutChurn$'
+go test -run '^$' -bench "$bench" -benchtime=200ms -count=6 -cpu=1 > scalar.txt
+go test -tags insdict_simd -run '^$' -bench "$bench" -benchtime=200ms -count=6 -cpu=1 > simd.txt
+go test -tags 'insdict_simd,insdict_swar' -run '^$' -bench "$bench" -benchtime=200ms -count=6 -cpu=1 > swar.txt
+benchstat scalar.txt simd.txt swar.txt
+```
+
+Point lookups use randomized queries prepared outside timing. `probes/op`
+counts individual slots in the default build; `groups/op` counts 16-slot groups
+in the experiment. Compare times, not these two counters directly.
+
+On an Intel i7-1068NG7, Darwin/amd64, Go 1.26.4-pont-onethread, a six-sample
+confirmation run measured these medians (ns/lookup; lower is better):
+
+| Integer lookup | Default | Grouped SSE2 |
+| -------------- | ------: | -----------: |
+| 1,024 keys, hit | 6.27 | 11.78 |
+| 1,024 keys, miss | 6.37 | 10.46 |
+| 16,384 keys, hit | 12.89 | 17.06 |
+| 16,384 keys, miss | 16.01 | 10.87 |
+
+The isolated 16-byte matcher took 2.34 ns with SSE2 versus 6.90 ns with portable
+SWAR in the same build. A broader three-sample screen also found regressions
+in large-table hits, construction, overwrites, and churn. These measurements
+support keeping this first prototype opt-in; they do not establish a general
+SIMD speedup. Linux and ARM performance need measurements on those systems.
+Raw samples and commands are in [simd_benchmarks.txt](simd_benchmarks.txt).
+
+Validation on Darwin/amd64: full tests passed for the default, SSE2, SWAR, and
+`purego` builds; the SSE2 build also passed `-race` and `checkptr=2`. `go vet`
+passed for default, SSE2, and SWAR. Both default and experimental test binaries
+cross-compiled for Darwin/arm64 and Linux/amd64, arm64, 386, and s390x.
+Those cross-compiled binaries were not executed on their target systems.
+
 # Dict memory overhead is about 1.34x to 1.7x
 
 For 1,000,000 map[int]int entries vs Dict, heap after GC:

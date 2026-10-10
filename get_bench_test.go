@@ -66,6 +66,9 @@ func benchmarkPointGet[K comparable](b *testing.B, key func(int) K) {
 							probes := pointGetProbes(d, queries)
 							for _, impl := range []string{"Dict", "Dict2", "Map", "Map2", "Fused", "TypedInt", "Tagged"} {
 								b.Run(impl, func(b *testing.B) {
+									if groupedProbing && impl != "Dict" && impl != "Dict2" && impl != "Map" && impl != "Map2" {
+										b.Skip("candidate assumes the scalar perturb probe sequence")
+									}
 									intDict, isInt := any(d).(*Dict[int, int])
 									intQueries, _ := any(queries).([]int)
 									if impl == "TypedInt" && !isInt {
@@ -115,7 +118,11 @@ func benchmarkPointGet[K comparable](b *testing.B, key func(int) K) {
 									b.StopTimer()
 									pointGetSink = sum
 									if impl != "Map" && impl != "Map2" {
-										b.ReportMetric(probes, "probes/op")
+										if groupedProbing {
+											b.ReportMetric(probes, "groups/op")
+										} else {
+											b.ReportMetric(probes, "probes/op")
+										}
 										b.ReportMetric(float64(d.live)/float64(len(d.indices)), "load")
 										bytes := float64(cap(d.indices))*float64(unsafe.Sizeof(int(0))) + float64(cap(d.tags)) + float64(cap(d.entries))*float64(unsafe.Sizeof(entry[K, int]{}))
 										if impl == "Tagged" {
@@ -229,6 +236,28 @@ func pointGetProbes[K comparable](d *Dict[K, int], queries []K) float64 {
 	var probes int
 	for _, k := range queries {
 		h := d.hashOf(k)
+		if groupedProbing {
+			base := (h & d.mask) &^ uint64(groupWidth-1)
+			var step uint64
+		groups:
+			for {
+				probes++
+				for offset := 0; offset < groupWidth; offset++ {
+					ix := d.indices[int(base)+offset]
+					if ix >= 0 && d.entries[ix].hash == h && d.entries[ix].key == k {
+						break groups
+					}
+				}
+				for offset := 0; offset < groupWidth; offset++ {
+					if d.tags[int(base)+offset] == tagEmpty {
+						break groups
+					}
+				}
+				step += groupWidth
+				base = (base + step) & d.mask
+			}
+			continue
+		}
 		i, perturb := h&d.mask, h
 		for {
 			probes++
@@ -247,6 +276,9 @@ func pointGetProbes[K comparable](d *Dict[K, int], queries []K) float64 {
 }
 
 func TestPointGetCandidates(t *testing.T) {
+	if groupedProbing {
+		t.Skip("candidates assume the scalar perturb probe sequence")
+	}
 	for _, hash := range []func(int) uint64{nil, func(int) uint64 { return 0 }} {
 		d := NewDictFunc[int, int](hash)
 		if got := pointGetFused(d, 0); got != 0 {
