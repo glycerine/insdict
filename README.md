@@ -98,6 +98,33 @@ passed for default, SSE2, and SWAR. Both default and experimental test binaries
 cross-compiled for Darwin/arm64 and Linux/amd64, arm64, 386, and s390x.
 Those cross-compiled binaries were not executed on their target systems.
 
+On Linux, the simd work looks overall slower:
+
+~~~
+~/insdict (simd) $ go install golang.org/x/perf/cmd/benchstat@latest
+go: downloading golang.org/x/perf v0.0.0-20261009192801-be2c69fb417e
+go: downloading github.com/aclements/go-moremath v0.0.0-20210112150236-f10218a38794
+(goivy-venv) jaten@aorus ~/insdict (simd) $ echo $bench
+^BenchmarkPointGetInt$/^n=(1024|16384)$/^grown$/^(hit|miss)$/^Dict$|^BenchmarkGroupMasks$
+(goivy-venv) jaten@aorus ~/insdict (simd) $ go test -run '^$' -bench "$bench"   -benchtime=200ms -count=6 -cpu=1 > linux-default.txt
+(goivy-venv) jaten@aorus ~/insdict (simd) $ go test -tags insdict_simd -run '^$' -bench "$bench"   -benchtime=200ms -count=6 -cpu=1 > linux-simd.txt
+(goivy-venv) jaten@aorus ~/insdict (simd) $ go test -tags 'insdict_simd,insdict_swar' -run '^$' -bench "$bench"   -benchtime=200ms -count=6 -cpu=1 > linux-swar.txt
+(goivy-venv) jaten@aorus ~/insdict (simd) $ benchstat linux-default.txt linux-simd.txt linux-swar.txt
+goos: linux
+goarch: amd64
+pkg: github.com/glycerine/insdict
+cpu: AMD Ryzen Threadripper 3960X 24-Core Processor 
+                                    │ linux-default.txt │           linux-simd.txt            │            linux-swar.txt            │
+                                    │      sec/op       │    sec/op     vs base               │    sec/op     vs base                │
+PointGetInt/n=1024/grown/hit/Dict           6.624n ± 1%   11.115n ± 5%  +67.80% (p=0.002 n=6)   16.165n ± 1%  +144.04% (p=0.002 n=6)
+PointGetInt/n=1024/grown/miss/Dict          6.391n ± 5%    9.990n ± 1%  +56.29% (p=0.002 n=6)   15.570n ± 0%  +143.60% (p=0.002 n=6)
+PointGetInt/n=16384/grown/hit/Dict          12.02n ± 1%    17.11n ± 1%  +42.45% (p=0.002 n=6)    22.58n ± 0%   +87.97% (p=0.002 n=6)
+PointGetInt/n=16384/grown/miss/Dict         12.85n ± 1%    10.07n ± 0%  -21.63% (p=0.002 n=6)    16.12n ± 1%   +25.45% (p=0.002 n=6)
+GroupMasks/selected                         5.487n ± 1%    1.788n ± 1%  -67.41% (p=0.002 n=6)    5.518n ± 0%         ~ (p=0.063 n=6)
+GroupMasks/portable                         5.704n ± 0%    5.609n ± 1%   -1.66% (p=0.002 n=6)    5.745n ± 0%    +0.74% (p=0.002 n=6)
+geomean                                     7.676n         7.595n        -1.06%                  11.95n        +55.62%
+~~~
+
 # Dict memory overhead is about 1.34x to 1.7x
 
 For 1,000,000 map[int]int entries vs Dict, heap after GC:

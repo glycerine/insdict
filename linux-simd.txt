@@ -1,0 +1,42 @@
+goos: linux
+goarch: amd64
+pkg: github.com/glycerine/insdict
+cpu: AMD Ryzen Threadripper 3960X 24-Core Processor 
+BenchmarkPointGetInt/n=1024/grown/hit/Dict    	21593605	        11.63 ns/op	         1.001 groups/op	         0.5000 load	     62112 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1024/grown/hit/Dict    	21599725	        11.10 ns/op	         1.001 groups/op	         0.5000 load	     62112 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1024/grown/hit/Dict    	21719684	        11.10 ns/op	         1.001 groups/op	         0.5000 load	     62112 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1024/grown/hit/Dict    	21608163	        11.12 ns/op	         1.001 groups/op	         0.5000 load	     62112 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1024/grown/hit/Dict    	21579547	        11.11 ns/op	         1.001 groups/op	         0.5000 load	     62112 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1024/grown/hit/Dict    	21636819	        11.12 ns/op	         1.001 groups/op	         0.5000 load	     62112 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1024/grown/miss/Dict   	24030150	         9.937 ns/op	         1.022 groups/op	         0.5000 load	     62112 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1024/grown/miss/Dict   	23817132	         9.992 ns/op	         1.022 groups/op	         0.5000 load	     62112 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1024/grown/miss/Dict   	23945781	        10.01 ns/op	         1.022 groups/op	         0.5000 load	     62112 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1024/grown/miss/Dict   	23980136	         9.987 ns/op	         1.022 groups/op	         0.5000 load	     62112 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1024/grown/miss/Dict   	24093351	         9.983 ns/op	         1.022 groups/op	         0.5000 load	     62112 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=1024/grown/miss/Dict   	23907949	        10.02 ns/op	         1.022 groups/op	         0.5000 load	     62112 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/hit/Dict   	14029666	        17.02 ns/op	         1.001 groups/op	         0.5000 load	    993952 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/hit/Dict   	14116659	        17.05 ns/op	         1.001 groups/op	         0.5000 load	    993952 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/hit/Dict   	14022658	        17.15 ns/op	         1.001 groups/op	         0.5000 load	    993952 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/hit/Dict   	13894009	        17.15 ns/op	         1.001 groups/op	         0.5000 load	    993952 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/hit/Dict   	13949341	        17.13 ns/op	         1.001 groups/op	         0.5000 load	    993952 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/hit/Dict   	14016255	        17.10 ns/op	         1.001 groups/op	         0.5000 load	    993952 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/miss/Dict  	23871399	        10.06 ns/op	         1.005 groups/op	         0.5000 load	    993952 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/miss/Dict  	23875296	        10.07 ns/op	         1.005 groups/op	         0.5000 load	    993952 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/miss/Dict  	23901831	        10.07 ns/op	         1.005 groups/op	         0.5000 load	    993952 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/miss/Dict  	23870950	        10.07 ns/op	         1.005 groups/op	         0.5000 load	    993952 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/miss/Dict  	23710306	        10.08 ns/op	         1.005 groups/op	         0.5000 load	    993952 table_B	       0 B/op	       0 allocs/op
+BenchmarkPointGetInt/n=16384/grown/miss/Dict  	23725003	        10.11 ns/op	         1.005 groups/op	         0.5000 load	    993952 table_B	       0 B/op	       0 allocs/op
+BenchmarkGroupMasks/selected                  	134308947	         1.787 ns/op
+BenchmarkGroupMasks/selected                  	134315523	         1.787 ns/op
+BenchmarkGroupMasks/selected                  	134262506	         1.796 ns/op
+BenchmarkGroupMasks/selected                  	134357714	         1.808 ns/op
+BenchmarkGroupMasks/selected                  	127955667	         1.789 ns/op
+BenchmarkGroupMasks/selected                  	134329597	         1.787 ns/op
+BenchmarkGroupMasks/portable                  	42355285	         5.661 ns/op
+BenchmarkGroupMasks/portable                  	43000540	         5.648 ns/op
+BenchmarkGroupMasks/portable                  	37555734	         5.607 ns/op
+BenchmarkGroupMasks/portable                  	42837062	         5.610 ns/op
+BenchmarkGroupMasks/portable                  	42902151	         5.607 ns/op
+BenchmarkGroupMasks/portable                  	42782776	         5.608 ns/op
+PASS
+ok  	github.com/glycerine/insdict	10.071s
