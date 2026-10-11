@@ -587,6 +587,27 @@ func (d *Dict[K, V]) Clear() {
 	d.DeleteAll()
 }
 
+// ResetReuse deletes all entries while retaining the table's backing arrays.
+// It clears keys and values so pointer-bearing types release their references.
+// Hash and comparison functions are preserved. ResetReuse must not be called
+// during a SlowWriteAll iteration because it reuses entry positions.
+func (d *Dict[K, V]) ResetReuse() {
+	if d == nil {
+		return
+	}
+	if d.activeWriteIters != 0 {
+		panic("insdict: ResetReuse during SlowWriteAll")
+	}
+	d.cleanSort = false
+	d.sorted = nil
+	clear(d.entries)
+	d.entries = d.entries[:0]
+	clear(d.tags)
+	// Empty tags terminate probes before indices are read. Each insertion
+	// overwrites its index, so stale indices need no clearing.
+	d.live = 0
+}
+
 // Del removes k and reports whether it was present.
 //
 // Del will not automatically re-pack the underlying table, even
